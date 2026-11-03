@@ -287,6 +287,7 @@ async function ensureMiuvSession() {
 // de respaldo durante la transición. probeWorkerBase() hace ping de salud (GET / ok:true)
 // al arrancar el SW, fija el base activo y lo persiste (ep_worker_base, cola lenta-positiva).
 const WORKER_URLS = ['https://eminusplus.vercel.app', 'https://eminus.uvplus.workers.dev'];
+const EP_EXT_ORIGIN = 'chrome-extension://hhmkanfafjomoffacpahenjnehfcnhaj';
 let WORKER_URL = WORKER_URLS[0];
 let _workerProbe = null;
 function probeWorkerBase() {
@@ -338,7 +339,7 @@ async function summarizeViaWorker(description, timeoutMs) {
     const payload = JSON.stringify({ description });
     let res = await fetch(`${WORKER_URL}/api/summarize`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', Origin: EP_EXT_ORIGIN },
       body: payload,
       signal: controller.signal
     });
@@ -346,7 +347,7 @@ async function summarizeViaWorker(description, timeoutMs) {
       // FIX: solo fallback en 404/405 (compat) — antes hacía doble fetch incluso en 400/429 desperdiciando 12s y trabando
       res = await fetch(`${WORKER_URL}/api/description`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', Origin: EP_EXT_ORIGIN },
         body: payload,
         signal: controller.signal
       });
@@ -428,7 +429,7 @@ async function epEnsureUrls() {
   for (const b of WORKER_URLS) { if (b !== WORKER_URLS[0]) _unlockCandidates.push(b); }
   let _unlockLastErr = 'Unlock sin respuesta';
   for (const base of _unlockCandidates) {
-    const r = await fetch(base + '/api/unlock', { method: 'GET', credentials: 'omit' });
+    const r = await fetch(base + '/api/unlock', { method: 'GET', credentials: 'omit', headers: { Origin: EP_EXT_ORIGIN } });
     if (!r.ok) { _unlockLastErr = 'Unlock HTTP ' + r.status + ' @ ' + base; continue; }
     const j = await r.json().catch(() => ({}));
     if (!j.key) { _unlockLastErr = 'Unlock sin clave @ ' + base; continue; }
@@ -601,6 +602,7 @@ async function fetchMiuvViaWorker(pathKey) {
       method: 'GET',
       headers: {
         'Referer': 'https://eminus.uv.mx/eminus4/page/course/list',
+        Origin: EP_EXT_ORIGIN,
       },
       signal: controller.signal
     });
@@ -929,7 +931,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         await probeWorkerBase();
         const r = await fetch(WORKER_URL + '/api/suggest', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', Origin: EP_EXT_ORIGIN },
           body: JSON.stringify(body)
         });
         const j = await r.json().catch(() => ({}));
