@@ -402,6 +402,10 @@ function epTryDecrypt(key) {
     const d = {};
     for (const k of Object.keys(EP_URLS_ENC)) d[k] = epXor(EP_URLS_ENC[k], key);
     if (typeof d.b0 !== 'string' || !d.b0.startsWith('https://') || !d.horc.endsWith('.aspx')) return null;
+    // FIX 02-nov-2026: los valores cifrados traen bases viejas (dsia -> errorpage,
+    // MiUVestudiantes -> 404). La base real de las 5 paginas de widgets:
+    d.b0 = 'https://dsiapes.uv.mx/MIUV/Portales/Estudiantes/';
+    d.b1 = d.b0;
     return { bases: [d.b0, d.b1], paths: d, ver: EP_URLS_VER };
   } catch { return null; }
 }
