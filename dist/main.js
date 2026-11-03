@@ -10882,6 +10882,9 @@ function __ep_miuv_session_help(body) {
     }).catch(()=>{});
   } catch {}
 }
+function __ep_ctxInvalidStr(s){
+  try{ return /context (is )?invalid/i.test(String(s || '')) || /extensioncontext/i.test(String(s || '')); }catch{ return false; }
+}
 async function loadMiuvGrades() {
   const w = getOrCreateMiuvWidget();
   if (!w) return;
@@ -10979,8 +10982,9 @@ async function loadMiuvGrades() {
     renderPeriod(startIdx);
   } catch (err) {
     const msg = err.message || 'Error';
+    const isCtx = __ep_ctxInvalidStr(msg);
     const isSession = msg.includes('sesión');
-    body.innerHTML = `<div class="ep-miuv-empty" style="padding:24px 16px;"><div style="font-weight:600;color:#334155;margin-bottom:6px;">${isSession ? 'Sesión MiUV expirada' : 'Sin conexión'}</div><div style="color:#94a3b8;font-size:12px;margin-bottom:12px;">${sanitizeHTML(msg)}</div><button class="ep-miuv-retry-btn" data-retry="grades" style="padding:8px 14px;border-radius:999px;border:1px solid #e2e8f0;background:#fff;font-size:12px;font-weight:600;color:#0f172a;cursor:pointer;display:inline-flex;align-items:center;gap:6px;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v7h-7"/></svg> Reintentar</button></div>`;
+    body.innerHTML = `<div class="ep-miuv-empty" style="padding:24px 16px;"><div style="font-weight:600;color:#334155;margin-bottom:6px;">${isSession ? 'Sesión MiUV expirada' : isCtx ? 'Contexto de extensión inválido' : 'Sin conexión'}</div><div style="color:#94a3b8;font-size:12px;margin-bottom:12px;">${sanitizeHTML(msg)}</div><button class="ep-miuv-retry-btn" data-retry="grades" style="padding:8px 14px;border-radius:999px;border:1px solid #e2e8f0;background:#fff;font-size:12px;font-weight:600;color:#0f172a;cursor:pointer;display:inline-flex;align-items:center;gap:6px;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v7h-7"/></svg> Reintentar</button></div>`;
     const b = body.querySelector('[data-retry="grades"]');
     if (b) b.addEventListener('click', () => { w.dataset.gradesLoaded=''; loadMiuvGrades(); });
     if (isSession) { try { __ep_miuv_session_help(body); } catch {} }
@@ -12152,7 +12156,8 @@ async function loadScheduleIntoWidget() {
     if (response.autoLogged) console.log('[EP] Horario auto-cargado tras login silencioso MiUV');
     if (response.error) {
       const code = response.code || '';
-      const isNetwork = code === 'NETWORK' || response.error.includes('Failed to fetch') || response.error.includes('NetworkError') || response.error.includes('aborted');
+      const isCtx = __ep_ctxInvalidStr(response.error);
+      const isNetwork = !isCtx && (code === 'NETWORK' || response.error.includes('Failed to fetch') || response.error.includes('NetworkError') || response.error.includes('aborted'));
       const isSessionError = code === 'SESSION' || response.error.includes('sesión');
       const isInvalidCreds = code === 'INVALID_CREDS' || response.error.includes('Credenciales inválidas');
       const cached = await loadCache();
@@ -12164,7 +12169,8 @@ async function loadScheduleIntoWidget() {
       // ROBUSTO: sin loops ni contadores — el background ya aseguró la sesión una vez.
       // Solo queda error accionable + Reintentar manual (iniciado por el usuario, no automático).
       let title, hint;
-      if (isNetwork) { title = 'Sin conexión'; hint = 'No se pudo conectar a MiUV. Revisa tu internet/VPN o desactiva bloqueador y pulsa Reintentar.'; }
+      if (isCtx) { title = 'Contexto de extensión inválido'; hint = 'La extensión se recargó o su contexto se invalidó. Recarga la página o la extensión e intenta de nuevo.'; }
+      else if (isNetwork) { title = 'Sin conexión'; hint = 'No se pudo conectar a MiUV. Revisa tu internet/VPN o desactiva bloqueador y pulsa Reintentar.'; }
       else if (isInvalidCreds) { title = 'Credenciales no válidas en MiUV'; hint = 'Tu contraseña cambió o MiUV requiere login manual. Vuelve a iniciar sesión en Eminus para recapturar.'; }
       else if (code === 'NEEDS_MANUAL') { title = 'Abre MiUV una vez'; hint = response.error; }
       else if (isSessionError) { title = 'Inicia sesión en MiUV'; hint = 'Para ver tu horario necesitas iniciar sesión en MiUV. Si ya iniciaste en Eminus, pulsa Reintentar (auto-login).'; }
@@ -13213,7 +13219,8 @@ async function loadScheduleIndependent() {
     if (response.autoLogged) console.log('[EP] Horario independiente auto-cargado');
     if (response.error) {
       const code = response.code || '';
-      const isNetwork = code === 'NETWORK' || response.error.includes('Failed to fetch') || response.error.includes('NetworkError') || response.error.includes('aborted');
+      const isCtx = __ep_ctxInvalidStr(response.error);
+      const isNetwork = !isCtx && (code === 'NETWORK' || response.error.includes('Failed to fetch') || response.error.includes('NetworkError') || response.error.includes('aborted'));
       const isSessionError = code === 'SESSION' || response.error.includes('sesión');
       const isInvalidCreds = code === 'INVALID_CREDS' || response.error.includes('Credenciales inválidas');
       // Intentar caché antes de mostrar error — nunca dejar pantalla roja si hay datos previos
@@ -13230,7 +13237,8 @@ async function loadScheduleIndependent() {
       }
       // ROBUSTO: sin reintentos automáticos — el background ya aseguró la sesión una vez.
       let title, hint;
-      if (isNetwork) { title = 'Sin conexión'; hint = 'No se pudo conectar a MiUV. Revisa tu internet/VPN.'; }
+      if (isCtx) { title = 'Contexto de extensión inválido'; hint = 'La extensión se recargó o su contexto se invalidó. Recarga la página o la extensión e intenta de nuevo.'; }
+      else if (isNetwork) { title = 'Sin conexión'; hint = 'No se pudo conectar a MiUV. Revisa tu internet/VPN.'; }
       else if (isInvalidCreds) { title = 'Credenciales no válidas'; hint = 'Vuelve a iniciar sesión en Eminus para recapturar.'; }
       else if (code === 'NEEDS_MANUAL') { title = 'Abre MiUV una vez'; hint = response.error; }
       else if (isSessionError) { title = 'Inicia sesión en MiUV'; hint = 'Sesión expirada. Pulsa Reintentar.'; }
@@ -15917,13 +15925,14 @@ async function loadSchedule(panel) {
 
     if (response.error) {
       const code = response.code || '';
-      const isNetwork = code === 'NETWORK' || response.error.includes('Failed to fetch') || response.error.includes('NetworkError') || response.error.includes('aborted');
+      const isCtx = __ep_ctxInvalidStr(response.error);
+      const isNetwork = !isCtx && (code === 'NETWORK' || response.error.includes('Failed to fetch') || response.error.includes('NetworkError') || response.error.includes('aborted'));
       const isSessionError = code === 'SESSION' || response.error.includes('sesión');
       const isInvalidCreds = code === 'INVALID_CREDS' || response.error.includes('Credenciales inválidas');
       // ROBUSTO: sin loops — el background ya aseguró la sesión una vez.
       // Solo error accionable + Reintentar manual.
       body.innerHTML = `<div class="ep-schedule-error">
-        <span>${isInvalidCreds ? 'Credenciales no válidas' : code === 'NEEDS_MANUAL' ? 'Abre MiUV una vez' : isNetwork ? 'Sin conexión' : 'No se pudo cargar el horario'}</span>
+        <span>${isInvalidCreds ? 'Credenciales no válidas' : code === 'NEEDS_MANUAL' ? 'Abre MiUV una vez' : isCtx ? 'Contexto de extensión inválido' : isNetwork ? 'Sin conexión' : 'No se pudo cargar el horario'}</span>
         <span style="font-size:11px;color:#9ca3af;">${isInvalidCreds ? 'Vuelve a iniciar sesión en Eminus para recapturar.' : (code === 'NEEDS_MANUAL' && response.error ? sanitizeHTML(response.error) : 'Pulsa Reintentar ahora.')}</span>
         <button class="ep-schedule-retry-btn">Reintentar ahora</button>
       </div>`;

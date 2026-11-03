@@ -61,6 +61,7 @@ loadSessionFlag();
 // TAXONOMÍA ÚNICA de errores (sin contadores): el caller no reintenta, solo clasifica.
 function classifyMiuvError(msg) {
   const m = String(msg || '');
+  if (/context (is )?invalid|extensioncontext|Extension context/i.test(m)) return 'CTX_INVALIDATED';
   if (/Credenciales inválidas|INVALID_CREDS/i.test(m)) return 'INVALID_CREDS';
   if (/captcha|bloquead|NEEDS_MANUAL|redirigió|sitio principal|verificación manual|contenido inesperado|no confirmó la sesión/i.test(m)) return 'NEEDS_MANUAL';
   if (/sesión|No hay sesión|SESSION/i.test(m)) return 'SESSION';
