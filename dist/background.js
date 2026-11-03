@@ -282,12 +282,54 @@ async function ensureMiuvSession() {
   return miuvAutoLogin(creds.username, creds.password);
 }
 
-const WORKER_URL = 'https://eminus.uvplus.workers.dev';
+// FIX MIGRACIÓN: worker movido a Vercel (install primario), Cloudflare workers.dev queda
+// de respaldo durante la transición. probeWorkerBase() hace ping de salud (GET / ok:true)
+// al arrancar el SW, fija el base activo y lo persiste (ep_worker_base, cola lenta-positiva).
+const WORKER_URLS = ['https://eminusplus.vercel.app', 'https://eminus.uvplus.workers.dev'];
+let WORKER_URL = WORKER_URLS[0];
+let _workerProbe = null;
+function probeWorkerBase() {
+  if (_workerProbe) return _workerProbe;
+  _workerProbe = (async () => {
+    // Arranca con el último base que respondió bien (si el SW se reinició a mitad de sesión)
+    let persisted = null;
+    try {
+      const c = await chrome.storage.local.get(['ep_worker_base']);
+      const b = c && c['ep_worker_base'];
+      if (b && WORKER_URLS.indexOf(b) !== -1) { persisted = b; WORKER_URL = b; }
+    } catch {}
+    // FIX ping-pong: se prueba PRIMERO el base persistido (si el unlock ya eligió el
+    // respaldo por estar sano, no hay que revertir a la primaria solo porque su / responde)
+    const order = [];
+    if (persisted) order.push(persisted);
+    for (const b of WORKER_URLS) if (b !== persisted) order.push(b);
+    for (const base of order) {
+      const ctl = new AbortController();
+      const t = setTimeout(() => ctl.abort(), 4000);
+      try {
+        const r = await fetch(base + '/', { signal: ctl.signal });
+        if (r.ok) {
+          const j = await r.json().catch(() => null);
+          if (j && j.ok) {
+            WORKER_URL = base;
+            try { await chrome.storage.local.set({ 'ep_worker_base': base }); } catch {}
+            break;
+          }
+        }
+      } catch {}
+      finally { clearTimeout(t); }
+    }
+    if (WORKER_URL !== WORKER_URLS[0]) try { await chrome.storage.local.set({ 'ep_worker_base': WORKER_URL }); } catch {}
+    return WORKER_URL;
+  })().finally(() => { _workerProbe = null; });
+  return _workerProbe;
+}
 
 // Resumen IA vía Worker proxy (key nunca en cliente)
 // El Worker guarda GEMINI_API_KEY como secret y llama a Gemini
 // timeoutMs paramétrico: el asistente (cascada de modelos) necesita más aire que un resumen
 async function summarizeViaWorker(description, timeoutMs) {
+  await probeWorkerBase();
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), timeoutMs || 9000);
   try {
@@ -375,16 +417,33 @@ async function epEnsureUrls() {
   } catch {}
   // Rotacion automatica: la guardada ya no abre -> pide la vigente.
   try { await chrome.storage.local.remove([EP_URLKEY_CACHE]); } catch {}
-  const r = await fetch(WORKER_URL + '/api/unlock', { method: 'GET', credentials: 'omit' });
-  if (!r.ok) throw new Error('Unlock HTTP ' + r.status);
-  const j = await r.json().catch(() => ({}));
-  if (!j.key) throw new Error('Unlock sin clave');
-  const nc = { key: String(j.key), ver: String(j.ver || EP_URLS_VER), ts: Date.now() };
-  try { await chrome.storage.local.set({ [EP_URLKEY_CACHE]: nc }); } catch {}
-  const d2 = epTryDecrypt(nc.key);
-  if (!d2) throw new Error('Clave vigente invalida');
-  EP_URLS = d2;
-  return d2;
+  await probeWorkerBase();
+  // FIX MIGRACIÓN: el unlock decide, no el probe de /. Vercel puede tener / sano pero
+  // EP_URL_KEY sin migrar (unlock 503) — en ese caso se prueba el respaldo (workers.dev)
+  // antes de morir, para que los widgets sigan vivos durante toda la transición.
+  // ORDEN FIJO primario→respaldo: cuando Vercel reciba sus secrets, la extensión vuelve
+  // sola a Vercel (y el fix no depende de que el usuario limpie ep_worker_base).
+  const _unlockCandidates = [WORKER_URLS[0]];
+  for (const b of WORKER_URLS) { if (b !== WORKER_URLS[0]) _unlockCandidates.push(b); }
+  let _unlockLastErr = 'Unlock sin respuesta';
+  for (const base of _unlockCandidates) {
+    const r = await fetch(base + '/api/unlock', { method: 'GET', credentials: 'omit' });
+    if (!r.ok) { _unlockLastErr = 'Unlock HTTP ' + r.status + ' @ ' + base; continue; }
+    const j = await r.json().catch(() => ({}));
+    if (!j.key) { _unlockLastErr = 'Unlock sin clave @ ' + base; continue; }
+    const nc = { key: String(j.key), ver: String(j.ver || EP_URLS_VER), ts: Date.now() };
+    try { await chrome.storage.local.set({ [EP_URLKEY_CACHE]: nc }); } catch {}
+    const d2 = epTryDecrypt(nc.key);
+    if (!d2) { _unlockLastErr = 'Clave vigente invalida @ ' + base; continue; }
+    // Base buena encontrada: fíjala y persiste el cambio si es distinta al probe inicial
+    if (base !== WORKER_URL) {
+      WORKER_URL = base;
+      try { await chrome.storage.local.set({ 'ep_worker_base': base }); } catch {}
+    }
+    EP_URLS = d2;
+    return d2;
+  }
+  throw new Error(_unlockLastErr);
 }
 function EP_P(k) { try { return (EP_URLS && EP_URLS.paths[k]) || ''; } catch { return ''; } }
 // Recuerda qué base respondió bien por clave, para que los POST con ViewState
@@ -495,11 +554,15 @@ async function fetchMiuvDirect(pathKey, timeoutMs) {
 async function ensureDnrWorkerCookieRule(cookieHeader) {
   try {
     if (!chrome.declarativeNetRequest || !chrome.declarativeNetRequest.updateSessionRules) return;
+    // FIX MIGRACIÓN: el filtro sigue al worker ACTIVO (Vercel primario, Cloudflare respaldo).
+    // El probe ya corrió (siempre se llega aquí vía epEnsureUrls → fetchMiuvHtmlInternal).
+    let _dnrHost = 'eminusplus.vercel.app';
+    try { _dnrHost = new URL(WORKER_URL).host || _dnrHost; } catch {}
     const rule = {
       id: 1,
       priority: 1,
       condition: {
-        urlFilter: '||eminus.uvplus.workers.dev/api/miuv/',
+        urlFilter: '||' + _dnrHost + '/api/miuv/',
         resourceTypes: ['xmlhttprequest']
       },
       action: {
@@ -862,6 +925,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           ts: Date.now()
         };
         if (p.email) body.email = String(p.email).slice(0, 120);
+        await probeWorkerBase();
         const r = await fetch(WORKER_URL + '/api/suggest', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
