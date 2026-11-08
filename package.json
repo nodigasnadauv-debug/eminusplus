@@ -1,0 +1,11 @@
+{
+  "name": "eminusplus",
+  "version": "1.0.0",
+  "private": true,
+  "description": "EP userscript",
+  "scripts": {
+    "check": "node --check dist/main.js",
+    "test": "node --check dist/main.js",
+    "lint": "node --check dist/main.js"
+  }
+}

@@ -5,6 +5,93 @@ if(location.pathname.includes('/page/course/list')){
 var __ep_side_last = typeof __ep_side_last !== 'undefined' ? __ep_side_last : 0, __ep_arrow_last = typeof __ep_arrow_last !== 'undefined' ? __ep_arrow_last : 0, __ep_brand_last = typeof __ep_brand_last !== 'undefined' ? __ep_brand_last : 0, __ep_hideUV_last = typeof __ep_hideUV_last !== 'undefined' ? __ep_hideUV_last : 0, __ep_persistent_last = typeof __ep_persistent_last !== 'undefined' ? __ep_persistent_last : 0;
 // FIX SISTÉMICO: sync a window para evitar ReferenceError en lienzo + re-inyección SPA
 try{ window.__ep_side_last = window.__ep_side_last || __ep_side_last; window.__ep_arrow_last = window.__ep_arrow_last || __ep_arrow_last; window.__ep_brand_last = window.__ep_brand_last || __ep_brand_last; window.__ep_hideUV_last = window.__ep_hideUV_last || __ep_hideUV_last; window.__ep_persistent_last = window.__ep_persistent_last || __ep_persistent_last; }catch{}
+// Anti-rebote de sesion: a veces el sitio limpia localStorage justo despues del
+// login (sus propias peticiones al dashboard llegan 401 y su interceptor recarga
+// la pagina de login), obligando a teclear la contraseña otra vez. Al aparecer el
+// token fresco se guarda todo el estado del sitio en sessionStorage (que el sitio
+// no limpia) y, si la pagina nueva arranca sin token y a menos de 90s del login,
+// se restauran esas claves antes de que la app del sitio arranque (max 2 intentos).
+(function __ep_bounceRestore(){
+  try{
+    if(window.top !== window) return;
+    if(localStorage.getItem('accessToken')) return;
+    const apply = (o) => {
+      if(!o || !o.k || !o.k.accessToken) return false;
+      if((Date.now() - o.t) > 90000 || o.n >= 2){
+        console.log('[EP] rebote: sin restauracion (' + (!o ? 'nulo' : (o.n >= 2 ? 'intentos agotados' : 'instantanea vieja')) + ')');
+        return false;
+      }
+      const keys = Object.keys(o.k);
+      let restored = 0;
+      for(let i = 0; i < keys.length; i++){
+        const key = keys[i];
+        try{ if(!String(key).startsWith('ep_')){ localStorage.setItem(key, o.k[key]); restored++; } }catch{}
+      }
+      console.log('[EP] rebote de sesion: ' + restored + ' claves restauradas (intento ' + (o.n + 1) + ')');
+      return true;
+    };
+    const raw = sessionStorage.getItem('ep_bounce');
+    if(raw){
+      console.log('[EP] rebote: snapshot en sessionStorage presente');
+      let o = null; try{ o = JSON.parse(raw); }catch{}
+      try{ sessionStorage.removeItem('ep_bounce'); }catch{}
+      if(apply(o)){
+        try{ sessionStorage.setItem('ep_bounce', JSON.stringify({ t: o.t, n: o.n + 1, k: o.k })); }catch{}
+        return;
+      }
+    } else {
+      console.log('[EP] rebote: sin snapshot en sessionStorage, probando storage local');
+    }
+    // Fallback asincrono: el sitio puede limpiar sessionStorage ademas de localStorage
+    try{
+      if(chrome.storage && chrome.storage.local && !sessionStorage.getItem('ep_bounce_reloaded')){
+        chrome.storage.local.get(['ep_bounce2'], (r) => {
+          try{
+            const o = r && r.ep_bounce2;
+            console.log('[EP] rebote: storage local ' + ((o && o.k && o.k.accessToken) ? ('con snapshot (n=' + o.n + ')') : 'sin snapshot'));
+            if(localStorage.getItem('accessToken')) return;
+            if(apply(o)){
+              try{ sessionStorage.setItem('ep_bounce_reloaded', '1'); }catch{}
+              try{ sessionStorage.setItem('ep_bounce', JSON.stringify({ t: o.t, n: o.n + 1, k: o.k })); }catch{}
+              try{ chrome.storage.local.set({ ep_bounce2: { t: o.t, n: o.n + 1, k: o.k } }); }catch{}
+              console.log('[EP] rebote: recargando para que la app arranque con la sesion');
+              location.reload();
+            } else {
+              try{ chrome.storage.local.remove('ep_bounce2'); }catch{}
+            }
+          }catch(e){ console.log('[EP] rebote: error fallback ' + (e && e.message)); }
+        });
+      }
+    }catch{}
+  }catch{}
+})();
+// Guarda el estado del sitio (incluido accessToken) justo cuando aparece un token
+// fresco; llamado desde el watcher de login-boost y del poll rapido tras el click.
+function __ep_bounceSnap(){
+  try{
+    if(window.top !== window) return;
+    const tok = localStorage.getItem('accessToken');
+    if(!tok) return;
+    const raw = sessionStorage.getItem('ep_bounce');
+    if(raw){
+      try{
+        const prev = JSON.parse(raw);
+        if(prev && prev.k && prev.k.accessToken === tok && (Date.now() - prev.t) < 90000) return;
+      }catch{}
+    }
+    const k = {};
+    const n = localStorage.length;
+    for(let i = 0; i < n; i++){
+      const key = localStorage.key(i);
+      try{ if(key && !String(key).startsWith('ep_')) k[key] = localStorage.getItem(key); }catch{}
+    }
+    k.accessToken = tok;
+    const snap = { t: Date.now(), n: 0, k: k };
+    try{ sessionStorage.setItem('ep_bounce', JSON.stringify(snap)); }catch{}
+    try{ chrome.storage && chrome.storage.local && chrome.storage.local.set({ ep_bounce2: snap }); }catch{}
+    console.log('[EP] bounce: snapshot del sitio (' + (Object.keys(k).length) + ' claves, token len ' + tok.length + ')');
+  }catch{}
+}
  // API Endpoints
 const API_ENDPOINTS = {
   COURSES: "/eminusapi/api/Cursos/getAllCourses",
@@ -23,7 +110,7 @@ const API_ENDPOINTS = {
 // Base URL
 const BASE_URL = "https://eminus.uv.mx";
 console.log('[EP] Eminus Plus v2.1.7 — activo');
-console.log('[EP] build 3.12.37-instant (cache-por-usuario)');
+console.log('[EP] build 3.12.38-instant (cache-por-usuario)');
 try { window.__ep_t0 = performance.now(); } catch {}
 // Log de timing [EP-T]: ms desde que el content script arranca (diagnóstico en consola F12)
 function __ep_log(){ try{ const t = Math.round(performance.now() - (window.__ep_t0 || performance.now())); console.log.apply(console, ['[EP-T +' + t + 'ms]'].concat([].slice.call(arguments))); }catch{} }
@@ -1630,7 +1717,7 @@ function applyEpConfig(cfg){
         .ep-wrapper.ep-side-left:has(.ep-right-stack.ep-state-hidden), .ep-wrapper.ep-side-right:has(.ep-right-stack.ep-state-hidden), .ep-wrapper:has(.ep-right-stack.ep-state-hidden), .ep-wrapper.ep-side-left.ep-collapsed, .ep-wrapper.ep-side-right.ep-collapsed, .ep-wrapper.ep-collapsed { gap:0 !important; }
         .ep-wrapper.ep-side-left .ep-right-stack.ep-state-hidden, .ep-wrapper.ep-side-right .ep-right-stack.ep-state-hidden, .ep-right-stack.ep-state-hidden { margin-left:0 !important; margin-right:0 !important; max-width:0 !important; min-width:0 !important; flex:0 0 0 !important; overflow:hidden !important; }
         .ep-wrapper.ep-side-left .ep-right-stack.ep-hidden, .ep-wrapper.ep-side-right .ep-right-stack.ep-hidden { margin-left:0 !important; margin-right:0 !important; }
-        .ep-config-btn{ width:32px; height:32px; border-radius:999px; border:1px solid #e2e8f0; background:#fff; color:#475569; display:inline-flex; align-items:center; justify-content:center; cursor:pointer; transition: all 160ms ease; flex-shrink:0; }
+        .ep-config-btn{ width:32px; height:32px; border-radius:999px; border:1px solid #e2e8f0; color:#475569; display:inline-flex; align-items:center; justify-content:center; cursor:pointer; transition: all 160ms ease; flex-shrink:0; }
         .ep-config-btn:hover{ background:#f8fafc; border-color:#cbd5e1; color:#0f172a; transform: translateY(-0.5px); }
         .ep-config-btn:active{ transform:scale(0.96); }
         .ep-dark .ep-config-btn{ background:#1e2e4a; border-color:#2a3f62; color:#cbd5e1; }
@@ -4670,13 +4757,14 @@ function getStylesFull() {
       transform: translateY(8px) scale(0.96) translateZ(0) !important;
       filter: blur(8px) !important;
       visibility: hidden !important;
+      pointer-events: none !important;
       max-width: 0 !important;
       flex: 0 0 0 !important;
     }
     .ep-wrapper.ep-collapsed { gap: 0 !important; }
     .ep-wrapper.ep-collapsed .d-flex.flex-column.align-items-center.mt-3 { flex: 1; max-width: 100%; }
     /* Apple §1 + §10: Response on pointerdown, hover gated, no layout shift */
-    .ep-tasks-btn, .ep-schedule-btn, .ep-mail-btn, .ep-miuv-btn {
+    .ep-tasks-btn, .ep-schedule-btn, .ep-mail-btn, .ep-miuv-btn, .ep-config-btn {
       position: relative !important;
       transition:
         transform var(--ep-dur-press) var(--ep-ease-out),
@@ -4686,40 +4774,41 @@ function getStylesFull() {
       transform: translateZ(0);
     }
     @media (hover: hover) and (pointer: fine) {
-      .ep-tasks-btn:hover, .ep-schedule-btn:hover, .ep-mail-btn:hover, .ep-miuv-btn:hover {
+      .ep-tasks-btn:hover, .ep-schedule-btn:hover, .ep-mail-btn:hover, .ep-miuv-btn:hover, .ep-config-btn:hover {
         background: rgba(255,255,255,0.12) !important;
         filter: brightness(1.06) !important;
       }
       .ep-tasks-btn:hover .ep-tasks-icon,
       .ep-schedule-btn:hover .ep-schedule-icon,
       .ep-mail-btn:hover .ep-mail-icon,
-      .ep-miuv-btn:hover .ep-miuv-icon {
+      .ep-miuv-btn:hover .ep-miuv-icon,
+      .ep-config-btn:hover .ep-config-icon {
         transform: scale(1.04) translateZ(0) !important;
       }
     }
-    .ep-tasks-btn:active, .ep-schedule-btn:active, .ep-mail-btn:active, .ep-miuv-btn:active {
+    .ep-tasks-btn:active, .ep-schedule-btn:active, .ep-mail-btn:active, .ep-miuv-btn:active, .ep-config-btn:active {
       transform: scale(0.96) translateZ(0) !important;
       transition: transform 100ms var(--ep-ease-out) !important;
       filter: brightness(0.98) !important;
     }
-    .ep-tasks-btn .ep-tasks-icon, .ep-schedule-btn .ep-schedule-icon, .ep-mail-btn .ep-mail-icon, .ep-miuv-btn .ep-miuv-icon {
+    .ep-tasks-btn .ep-tasks-icon, .ep-schedule-btn .ep-schedule-icon, .ep-mail-btn .ep-mail-icon, .ep-miuv-btn .ep-miuv-icon, .ep-config-btn .ep-config-icon {
       transition: transform 260ms var(--ep-ease-spring) !important;
       will-change: transform !important;
       transform: translateZ(0);
     }
     /* FIX: selección unificada — la píldora deslizante ES el diseño (igual en los 4);
        el botón solo enfatiza el icono. La píldora se mueve con spring e interrumpible (Apple §3/§7/§11). */
-    .ep-tasks-btn.active, .ep-schedule-btn.active, .ep-schedule-btn.ep-active, .ep-mail-btn.active, .ep-miuv-btn.active, .ep-miuv-btn.ep-active {
+    .ep-tasks-btn.active, .ep-schedule-btn.active, .ep-schedule-btn.ep-active, .ep-mail-btn.active, .ep-miuv-btn.active, .ep-miuv-btn.ep-active, .ep-config-btn.active, .ep-config-btn.ep-active {
       background: transparent !important;
       box-shadow: none !important;
       transform: none !important;
       filter: none !important;
       color: #fff !important;
     }
-    .ep-tasks-btn.active .ep-tasks-icon, .ep-schedule-btn.active .ep-schedule-icon, .ep-schedule-btn.ep-active .ep-schedule-icon, .ep-mail-btn.active .ep-mail-icon, .ep-miuv-btn.active .ep-miuv-icon, .ep-miuv-btn.ep-active .ep-miuv-icon {
+    .ep-tasks-btn.active .ep-tasks-icon, .ep-schedule-btn.active .ep-schedule-icon, .ep-schedule-btn.ep-active .ep-schedule-icon, .ep-mail-btn.active .ep-mail-icon, .ep-miuv-btn.active .ep-miuv-icon, .ep-miuv-btn.ep-active .ep-miuv-icon, .ep-config-btn.active svg, .ep-config-btn.ep-active svg, .ep-config-btn.active .ep-config-icon, .ep-config-btn.ep-active .ep-config-icon {
       transform: scale(1.1) translateZ(0) !important;
     }
-    .ep-tasks-btn, .ep-schedule-btn, .ep-mail-btn, .ep-miuv-btn, .ep-mail-bar { position: relative; z-index: 1; }
+    .ep-tasks-btn, .ep-schedule-btn, .ep-mail-btn, .ep-miuv-btn, .ep-mail-bar, .ep-config-btn { position: relative; z-index: 1; }
     .ep-btn-indicator {
       position: absolute !important;
       left: 0 !important; top: 0 !important;
@@ -4749,7 +4838,7 @@ function getStylesFull() {
       .ep-right-stack .dues-container,
       .ep-right-stack .ep-schedule-widget,
       .ep-right-stack .ep-mail-widget,
-      .ep-tasks-btn, .ep-schedule-btn, .ep-mail-btn,
+      .ep-tasks-btn, .ep-schedule-btn, .ep-mail-btn, .ep-miuv-btn, .ep-config-btn,
       .dropdown-menu, .subject-filter-menu,
       .act-item, .ep-schedule-card, .ep-mail-item,
       .acts-list, .loader, .skeleton-card::after {
@@ -7005,10 +7094,38 @@ function getStylesFull() {
       transition: transform var(--ep-dur-press) var(--ep-ease-out), background var(--ep-dur-fast) var(--ep-ease-out), filter var(--ep-dur-fast) var(--ep-ease-out) !important;
       touch-action: manipulation !important;
     }
-    .ep-schedule-btn:hover, .ep-mail-btn:hover, .ep-tasks-btn:hover { background: rgba(255,255,255,0.12) !important; color: #fff !important; filter: brightness(1.06) !important; }
-    .ep-schedule-btn:active, .ep-mail-btn:active, .ep-tasks-btn:active { transform: scale(0.96) translateZ(0) !important; transition-duration: 100ms !important; filter: brightness(0.98) !important; }
-    .ep-schedule-icon, .ep-mail-icon, .ep-tasks-icon, .ep-miuv-icon { width: 19px !important; height: 19px !important; display: block !important; pointer-events: none !important; transition: transform 260ms var(--ep-ease-spring) !important; will-change: transform !important; transform: translateZ(0) !important; stroke-width: 2.6 !important; vector-effect: non-scaling-stroke !important; }
-    .ep-schedule-btn:hover .ep-schedule-icon, .ep-mail-btn:hover .ep-mail-icon, .ep-tasks-btn:hover .ep-tasks-icon { transform: scale(1.04) translateZ(0) !important; }
+    .ep-schedule-btn:hover, .ep-mail-btn:hover, .ep-tasks-btn:hover, .ep-config-btn:hover { background: rgba(255,255,255,0.12) !important; color: #fff !important; filter: brightness(1.06) !important; }
+    .ep-schedule-btn:active, .ep-mail-btn:active, .ep-tasks-btn:active, .ep-config-btn:active { transform: scale(0.96) translateZ(0) !important; transition-duration: 100ms !important; filter: brightness(0.98) !important; }
+    .ep-schedule-icon, .ep-mail-icon, .ep-tasks-icon, .ep-miuv-icon, .ep-config-icon { width: 19px !important; height: 19px !important; display: block !important; pointer-events: none !important; transition: transform 260ms var(--ep-ease-spring) !important; will-change: transform !important; transform: translateZ(0) !important; stroke-width: 2.6 !important; vector-effect: non-scaling-stroke !important; }
+    .ep-schedule-btn:hover .ep-schedule-icon, .ep-mail-btn:hover .ep-mail-icon, .ep-tasks-btn:hover .ep-tasks-icon, .ep-config-btn:hover .ep-config-icon { transform: scale(1.04) translateZ(0) !important; }
+    /* FIX: botón de configuración en la barra — misma gramática que los 4 de arriba.
+       Scope .m-notification para NO tocar los .ep-config-btn de los widgets/paneles. */
+    .m-notification .ep-config-btn {
+      position: relative !important;
+      display: flex !important;
+      align-items: center !important;
+      justify-content: center !important;
+      width: 38px !important;
+      height: 38px !important;
+      border-radius: 50% !important;
+      cursor: pointer !important;
+      color: rgba(255,255,255,0.85) !important;
+      background: transparent !important;
+      border: none !important;
+      padding: 0 !important;
+      margin: 0 2px !important;
+      will-change: transform !important;
+      transform: translateZ(0) !important;
+      transition: transform var(--ep-dur-press) var(--ep-ease-out), background var(--ep-dur-fast) var(--ep-ease-out), filter var(--ep-dur-fast) var(--ep-ease-out) !important;
+      touch-action: manipulation !important;
+      z-index: 1 !important;
+    }
+    .m-notification .ep-config-btn:active { transform: scale(0.96) translateZ(0) !important; transition-duration: 100ms !important; filter: brightness(0.98) !important; }
+    .m-notification .ep-config-btn svg, .m-notification .ep-config-btn .ep-config-icon { width: 19px !important; height: 19px !important; display: block !important; pointer-events: none !important; transition: transform 260ms var(--ep-ease-spring) !important; will-change: transform !important; transform: translateZ(0) !important; stroke-width: 2.6 !important; vector-effect: non-scaling-stroke !important; }
+    @media (hover: hover) and (pointer: fine) {
+      .m-notification .ep-config-btn:hover { background: rgba(255,255,255,0.12) !important; color: #fff !important; filter: brightness(1.06) !important; }
+      .m-notification .ep-config-btn:hover svg, .m-notification .ep-config-btn:hover .ep-config-icon { transform: scale(1.04) translateZ(0) !important; }
+    }
 
     .ep-schedule-panel {
       position: fixed !important;
@@ -8194,6 +8311,252 @@ function getStylesFull() {
     @media (prefers-reduced-transparency: reduce) {
       .ep-confirm-overlay { backdrop-filter: none !important; background: rgba(15,23,42,0.5) !important; }
       .ep-confirm-card { backdrop-filter: none !important; background: #ffffff !important; }
+    }
+    /* ===== EP ANIMACIONES v1 - pestanas/secciones + loader premium (solo visual) ===== */
+    @keyframes epPaneIn {
+      from { opacity: 0; transform: translateY(8px) scale(0.99); filter: blur(3px); }
+      to   { opacity: 1; transform: none; filter: none; }
+    }
+    @keyframes epPaneItemIn {
+      from { opacity: 0; transform: translateY(6px); }
+      to   { opacity: 1; transform: none; }
+    }
+    .ep-miuv-widget .ep-miuv-body-section.active,
+    .ep-config-widget .ep-config-section.active {
+      animation: epPaneIn 260ms var(--ep-ease-spring) both;
+    }
+    .ep-miuv-widget .ep-miuv-body-section.active > :not(.loader-div),
+    .ep-config-widget .ep-config-section.active > * {
+      animation: epPaneItemIn 320ms var(--ep-ease-out) both;
+    }
+    .ep-config-widget .ep-config-section.active > *:nth-child(2),
+    .ep-miuv-widget .ep-miuv-body-section.active > :not(.loader-div):nth-child(2) { animation-delay: 45ms; }
+    .ep-config-widget .ep-config-section.active > *:nth-child(3),
+    .ep-miuv-widget .ep-miuv-body-section.active > :not(.loader-div):nth-child(3) { animation-delay: 85ms; }
+    .ep-config-widget .ep-config-section.active > *:nth-child(n+4),
+    .ep-miuv-widget .ep-miuv-body-section.active > :not(.loader-div):nth-child(n+4) { animation-delay: 125ms; }
+    .ep-miuv-widget .loader-div { animation: epLoaderBreath 1.8s ease-in-out infinite; }
+    .ep-miuv-widget .loader-text { animation: epPaneItemIn 320ms var(--ep-ease-out) both; }
+    @keyframes epLoaderBreath {
+      0%, 100% { opacity: 0.72; transform: scale(0.985); }
+      50%      { opacity: 1; transform: scale(1.005); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .ep-miuv-widget .ep-miuv-body-section.active,
+      .ep-config-widget .ep-config-section.active,
+      .ep-miuv-widget .ep-miuv-body-section.active > *,
+      .ep-config-widget .ep-config-section.active > *,
+      .ep-miuv-widget .loader-div,
+      .ep-miuv-widget .loader-text { animation: none !important; }
+    }
+    /* ===== EP ANIMACIONES v2 - liquid glass open/close + exits suaves (solo visual) ===== */
+    :root {
+      --ep-liquid-in: cubic-bezier(0.34, 1.22, 0.36, 1);      /* spring overshoot, solo transform */
+      --ep-liquid-fade: cubic-bezier(0.22, 0.61, 0.36, 1);   /* opacity sin overshoot */
+      --ep-liquid-open-delay: 70ms;
+      --ep-dur-open: 520ms;
+      --ep-dur-fade: 320ms;
+      --ep-dur-haze: 420ms;
+      --ep-dur-close: 340ms;
+      --ep-dur-close-fade: 240ms;
+      --ep-liquid-backdrop-live: blur(24px) saturate(180%);
+      --ep-liquid-backdrop-out: blur(8px) saturate(1.2);
+      --ep-liquid-shadow: 0 24px 60px -16px rgba(15,23,42,.30), 0 2px 8px rgba(15,23,42,.10), inset 0 1px 0 rgba(255,255,255,.55), inset 0 -1px 0 rgba(255,255,255,.08);
+      --ep-liquid-shadow-exit: 0 1px 2px rgba(0,0,0,.06);
+    }
+    /* dark: sombra mas profunda y inset highlight tenue (el vidrio oscuro pierde contraste con highlights fuertes) */
+    .ep-dark {
+      --ep-liquid-shadow: 0 24px 60px -16px rgba(0,0,0,.45), 0 2px 8px rgba(0,0,0,.2), inset 0 1px 0 rgba(255,255,255,.14), inset 0 -1px 0 rgba(255,255,255,.05);
+    }
+    /* Stack: push de ancho deslizado (iOS), sin salto de layout */
+    .ep-right-stack {
+      transition:
+        opacity var(--ep-dur-stack) var(--ep-ease-spring),
+        transform var(--ep-dur-stack) var(--ep-ease-spring),
+        filter var(--ep-dur-stack) var(--ep-ease-spring),
+        flex-basis 440ms var(--ep-ease-drawer),
+        max-width 440ms var(--ep-ease-drawer),
+        min-width 440ms var(--ep-ease-drawer),
+        margin-left 440ms var(--ep-ease-drawer);
+    }
+    /* Cierre del stack: disolucion con blur suave y ancho deslizando */
+    .ep-right-stack.ep-state-hidden {
+      opacity: 0 !important;
+      transform: translateY(10px) scale(0.98) translateZ(0) !important;
+      filter: blur(8px) saturate(1.05) !important;
+      visibility: hidden !important;
+      pointer-events: none !important;
+      max-width: 0 !important;
+      min-width: 0 !important;
+      margin-left: 0 !important;
+      flex: 0 0 0 !important;
+      overflow: hidden !important;
+      transition:
+        flex-basis 420ms var(--ep-ease-drawer),
+        max-width 420ms var(--ep-ease-drawer),
+        min-width 420ms var(--ep-ease-drawer),
+        margin-left 420ms var(--ep-ease-drawer),
+        opacity 240ms var(--ep-ease-drawer),
+        transform 340ms var(--ep-ease-drawer),
+        filter 340ms var(--ep-ease-drawer),
+        backdrop-filter 340ms var(--ep-ease-drawer),
+        -webkit-backdrop-filter 340ms var(--ep-ease-drawer),
+        box-shadow 340ms var(--ep-ease-drawer),
+        visibility 0ms linear 360ms !important;
+    }
+    .ep-wrapper { transition: gap 420ms var(--ep-ease-drawer); }
+    /* Colapso total (ultimo widget cerrado): mismo movimiento que ep-state-hidden */
+    .ep-wrapper.ep-collapsed .ep-right-stack {
+      opacity: 0 !important;
+      transform: translateY(8px) scale(0.97) translateZ(0) !important;
+      filter: blur(4px) saturate(1.05) !important;
+      visibility: hidden !important;
+      pointer-events: none !important;
+      max-width: 0 !important;
+      min-width: 0 !important;
+      margin-left: 0 !important;
+      flex: 0 0 0 !important;
+      overflow: hidden !important;
+      transition:
+        visibility 360ms linear,
+        opacity 300ms var(--ep-ease-drawer),
+        transform 420ms var(--ep-ease-drawer),
+        filter 420ms var(--ep-ease-drawer),
+        flex-basis 420ms var(--ep-ease-drawer),
+        max-width 420ms var(--ep-ease-drawer),
+        min-width 420ms var(--ep-ease-drawer),
+        margin-left 420ms var(--ep-ease-drawer) !important;
+    }
+    /* Entrada inicial (@starting-style): punto de partida mas suave */
+    @starting-style {
+      .ep-right-stack .dues-container,
+      .ep-right-stack .ep-schedule-widget,
+      .ep-right-stack .ep-mail-widget,
+      .ep-right-stack .ep-miuv-widget,
+      .ep-right-stack .ep-config-widget {
+        opacity: 0;
+        transform: translateY(18px) scale(0.965) translateZ(0);
+        filter: blur(12px) saturate(1.6);
+      }
+    }
+    /* Entrada de widget (flip de estado): delay 70ms solo en entrada; spring overshoot solo en
+       transform, opacity sin overshoot; haze blur interpolando con las 3 funciones de filter (sin matrix fallback) */
+    .ep-right-stack.ep-state-tasks .dues-container,
+    .ep-right-stack.ep-state-schedule .ep-schedule-widget,
+    .ep-right-stack.ep-state-mail .ep-mail-widget,
+    .ep-right-stack.ep-state-miuv .ep-miuv-widget,
+    .ep-right-stack.ep-state-config .ep-config-widget {
+      opacity: 1 !important;
+      transform: translateY(0) scale(1) translateZ(0) !important;
+      filter: blur(0px) saturate(1) !important;
+      backdrop-filter: var(--ep-liquid-backdrop-live) !important;
+      -webkit-backdrop-filter: var(--ep-liquid-backdrop-live) !important;
+      box-shadow: var(--ep-liquid-shadow) !important;
+      visibility: visible !important;
+      z-index: 1 !important;
+      transition:
+        transform var(--ep-dur-open) var(--ep-liquid-in) var(--ep-liquid-open-delay),
+        opacity var(--ep-dur-fade) var(--ep-liquid-fade) var(--ep-liquid-open-delay),
+        filter var(--ep-dur-haze) var(--ep-ease-out) var(--ep-liquid-open-delay),
+        backdrop-filter var(--ep-dur-haze) var(--ep-ease-out) var(--ep-liquid-open-delay),
+        -webkit-backdrop-filter var(--ep-dur-haze) var(--ep-ease-out) var(--ep-liquid-open-delay),
+        box-shadow var(--ep-dur-haze) var(--ep-ease-out) var(--ep-liquid-open-delay) !important;
+    }
+    /* Salida de widget: visibility ANTES saltaba al instante (desaparecia de golpe);
+       ahora permanece visible durante la disolucion y con curva drawer simetrica */
+    .ep-right-stack.ep-state-tasks .ep-schedule-widget,
+    .ep-right-stack.ep-state-tasks .ep-mail-widget,
+    .ep-right-stack.ep-state-tasks .ep-miuv-widget,
+    .ep-right-stack.ep-state-tasks .ep-config-widget,
+    .ep-right-stack.ep-state-schedule .dues-container,
+    .ep-right-stack.ep-state-schedule .ep-mail-widget,
+    .ep-right-stack.ep-state-schedule .ep-miuv-widget,
+    .ep-right-stack.ep-state-schedule .ep-config-widget,
+    .ep-right-stack.ep-state-mail .dues-container,
+    .ep-right-stack.ep-state-mail .ep-schedule-widget,
+    .ep-right-stack.ep-state-mail .ep-miuv-widget,
+    .ep-right-stack.ep-state-mail .ep-config-widget,
+    .ep-right-stack.ep-state-miuv .dues-container,
+    .ep-right-stack.ep-state-miuv .ep-schedule-widget,
+    .ep-right-stack.ep-state-miuv .ep-mail-widget,
+    .ep-right-stack.ep-state-miuv .ep-config-widget,
+    .ep-right-stack.ep-state-config .dues-container,
+    .ep-right-stack.ep-state-config .ep-schedule-widget,
+    .ep-right-stack.ep-state-config .ep-mail-widget,
+    .ep-right-stack.ep-state-config .ep-miuv-widget {
+      opacity: 0 !important;
+      transform: translateY(10px) scale(0.98) translateZ(0) !important;
+      filter: blur(8px) saturate(1.2) !important;
+      backdrop-filter: var(--ep-liquid-backdrop-out) !important;
+      -webkit-backdrop-filter: var(--ep-liquid-backdrop-out) !important;
+      box-shadow: var(--ep-liquid-shadow-exit) !important;
+      visibility: hidden !important;
+      pointer-events: none !important;
+      z-index: 2;
+      transition:
+        opacity var(--ep-dur-close-fade) var(--ep-ease-drawer),
+        transform var(--ep-dur-close) var(--ep-ease-drawer),
+        filter var(--ep-dur-close) var(--ep-ease-drawer),
+        backdrop-filter var(--ep-dur-close) var(--ep-ease-drawer),
+        -webkit-backdrop-filter var(--ep-dur-close) var(--ep-ease-drawer),
+        box-shadow var(--ep-dur-close) var(--ep-ease-drawer),
+        visibility 0ms linear var(--ep-dur-close) !important;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .ep-right-stack, .ep-right-stack *, .ep-wrapper {
+        transition-duration: 0.01ms !important;
+        transition-delay: 0ms !important;
+      }
+      /* f4: settle instantaneo sin blur/scale; mismas (0,3,0) que los bloques de estado para ganar */
+      .ep-right-stack.ep-state-hidden {
+        opacity: 0 !important;
+        transform: none !important;
+        filter: none !important;
+        visibility: hidden !important;
+        transition: none !important;
+        animation: none !important;
+      }
+      .ep-right-stack.ep-state-tasks .dues-container,
+      .ep-right-stack.ep-state-schedule .ep-schedule-widget,
+      .ep-right-stack.ep-state-mail .ep-mail-widget,
+      .ep-right-stack.ep-state-miuv .ep-miuv-widget,
+      .ep-right-stack.ep-state-config .ep-config-widget {
+        opacity: 1 !important;
+        transform: none !important;
+        filter: none !important;
+        visibility: visible !important;
+        box-shadow: var(--ep-liquid-shadow) !important;
+        transition: none !important;
+        animation: none !important;
+      }
+      .ep-right-stack.ep-state-tasks .ep-schedule-widget,
+      .ep-right-stack.ep-state-tasks .ep-mail-widget,
+      .ep-right-stack.ep-state-tasks .ep-miuv-widget,
+      .ep-right-stack.ep-state-tasks .ep-config-widget,
+      .ep-right-stack.ep-state-schedule .dues-container,
+      .ep-right-stack.ep-state-schedule .ep-mail-widget,
+      .ep-right-stack.ep-state-schedule .ep-miuv-widget,
+      .ep-right-stack.ep-state-schedule .ep-config-widget,
+      .ep-right-stack.ep-state-mail .dues-container,
+      .ep-right-stack.ep-state-mail .ep-schedule-widget,
+      .ep-right-stack.ep-state-mail .ep-miuv-widget,
+      .ep-right-stack.ep-state-mail .ep-config-widget,
+      .ep-right-stack.ep-state-miuv .dues-container,
+      .ep-right-stack.ep-state-miuv .ep-schedule-widget,
+      .ep-right-stack.ep-state-miuv .ep-mail-widget,
+      .ep-right-stack.ep-state-miuv .ep-config-widget,
+      .ep-right-stack.ep-state-config .dues-container,
+      .ep-right-stack.ep-state-config .ep-schedule-widget,
+      .ep-right-stack.ep-state-config .ep-mail-widget,
+      .ep-right-stack.ep-state-config .ep-miuv-widget {
+        opacity: 0 !important;
+        transform: none !important;
+        filter: none !important;
+        visibility: hidden !important;
+        pointer-events: none !important;
+        transition: none !important;
+        animation: none !important;
+      }
     }
   `;
 }
@@ -9911,7 +10274,7 @@ function hideAllWidgets() {
     stack.classList.add('ep-state-hidden');
   }
   document.querySelectorAll('.dues-container, .ep-schedule-widget, .ep-mail-widget, .ep-miuv-widget, .ep-config-widget').forEach(el => el.classList.add('ep-hidden'));
-  document.querySelectorAll('.ep-tasks-btn, .ep-schedule-btn, .ep-mail-btn, .ep-miuv-btn').forEach(b => {
+  document.querySelectorAll('.ep-tasks-btn, .ep-schedule-btn, .ep-mail-btn, .ep-miuv-btn, .ep-config-btn').forEach(b => {
     b.classList.remove('active', 'ep-active');
     b.style.background = '';
   });
@@ -9989,24 +10352,10 @@ function getOrCreateMiuvWidget(force) {
   if (!stack) return null;
   let w = stack.querySelector('.ep-miuv-widget');
   if (w) {
-    // Fix existente: actualiza botón si viene de versión vieja (sol/engrane roto) y re-engancha
+    // FIX: versiones viejas podian traer el engrane de config aca - se elimina si existe
     try{
-      const hdr = w.querySelector('.ep-miuv-widget-header');
-      if(hdr){
-        let b = hdr.querySelector('#ep-config-open');
-        const goodIcon = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 0 0 1.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 0 0-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 0 0-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 0 0-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 0 0-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 0 0 1.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0z"></path></svg>';
-        if(!b){
-          b=document.createElement('button'); b.className='ep-config-btn'; b.id='ep-config-open'; b.title='Configuración'; b.setAttribute('aria-label','Abrir configuración'); hdr.appendChild(b);
-        }
-        if(b.innerHTML.indexOf('M10.325')===-1){ b.innerHTML=goodIcon; }
-        if(!b.dataset.epBound){
-          b.dataset.epBound='1';
-          let _p=false; b.style.touchAction='manipulation';
-          b.addEventListener('pointerdown', (e)=>{ if(e.button!==0) return; e.preventDefault(); e.stopPropagation(); if(e.stopImmediatePropagation) e.stopImmediatePropagation(); _p=true; try{b.setPointerCapture(e.pointerId);}catch{} toggleConfigWidget(); try{navigator.vibrate?.(10);}catch{} setTimeout(()=>_p=false,400); });
-          b.addEventListener('click', (e)=>{ if(_p){ e.preventDefault(); e.stopPropagation(); return; } e.preventDefault(); e.stopPropagation(); if(e.stopImmediatePropagation) e.stopImmediatePropagation(); toggleConfigWidget(); });
-          b.addEventListener('dblclick', (e)=>{ e.preventDefault(); e.stopPropagation(); });
-        }
-      }
+      // FIX: el engrane se elimino del header de MiUV - limpia instancias viejas
+      try{ const old = w.querySelector('.ep-miuv-widget-header .ep-config-btn'); if(old) old.remove(); }catch{}
       // asegura config widget exista y no esté en estado roto
       if(!stack.querySelector('.ep-config-widget')) getOrCreateConfigWidget();
     }catch{}
@@ -10017,7 +10366,6 @@ function getOrCreateMiuvWidget(force) {
   w.innerHTML = `
     <div class="ep-miuv-widget-header">
       <h4 class="ep-miuv-widget-title">MiUV</h4>
-      <button class="ep-config-btn" id="ep-config-open" title="Configuración" aria-label="Abrir configuración"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 0 0 1.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 0 0-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 0 0-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 0 0-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 0 0-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 0 0 1.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0z"></path></svg></button>
     </div>
     <div class="ep-miuv-tabs">
       <button class="ep-miuv-tab active" data-miuv-tab="grades"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15l-2 2 2 2 2-2-2-2z"/><path d="M12 15V3"/><path d="M5 8l-2 2 2 2"/><path d="M19 8l2 2-2 2"/><path d="M7 21h10"/></svg> Califs</button>
@@ -10032,28 +10380,6 @@ function getOrCreateMiuvWidget(force) {
   `;
   stack.appendChild(w);
   w.addEventListener('dblclick', (e) => { if(e.target.closest('#ep-config-open')) return; e.preventDefault(); hideAllWidgets(); });
-  // Config button — como otro widget (pointerdown con capture, anti-dblclick, no cierra)
-  const cfgBtn = w.querySelector('#ep-config-open');
-  if(cfgBtn && !cfgBtn.dataset.epBound){
-    cfgBtn.dataset.epBound='1';
-    let _cfgPtr=false;
-    cfgBtn.style.touchAction='manipulation';
-    cfgBtn.addEventListener('pointerdown', (e)=>{
-      if(e.button!==0) return;
-      e.preventDefault(); e.stopPropagation(); if(e.stopImmediatePropagation) e.stopImmediatePropagation();
-      _cfgPtr=true;
-      try{ cfgBtn.setPointerCapture(e.pointerId);}catch{}
-      toggleConfigWidget();
-      try{ navigator.vibrate?.(10);}catch{}
-      setTimeout(()=> _cfgPtr=false, 400);
-    });
-    cfgBtn.addEventListener('click', (e)=>{
-      if(_cfgPtr){ e.preventDefault(); e.stopPropagation(); return; }
-      e.preventDefault(); e.stopPropagation(); if(e.stopImmediatePropagation) e.stopImmediatePropagation();
-      toggleConfigWidget();
-    });
-    cfgBtn.addEventListener('dblclick', (e)=>{ e.preventDefault(); e.stopPropagation(); });
-  }
   // Tabs handler — cambia sección sin recargar
   w.querySelectorAll('.ep-miuv-tab').forEach(btn => {
     btn.addEventListener('click', (e) => {
@@ -10196,15 +10522,17 @@ function getOrCreateConfigWidget(){
 function hideConfigWidget(){
   const w=document.querySelector('.ep-config-widget');
   if(w){ w.style.display='none'; w.classList.add('ep-hidden'); }
-  // FIX: restaura al default ORIGINAL (tasks), no al configurado (miuv/config)
+  // FIX reglas: cerrar config como los demas widgets - restaura el widget que estaba abierto
+  // antes de la config (tasks/schedule/mail/miuv); si no habia nada abierto, colapsa todo.
   try{
     window.__ep_config_open_until = 0;
     window.__ep_allow_hide_config = true;
-    // Usa el default original, no el guardado configurado
-    const target = 'tasks';
-    applyExclusiveWidget(target);
+    let prev = 'hidden';
+    try{ prev = localStorage.getItem('ep_active_widget_before_config') || 'hidden'; }catch{}
+    if(prev==='tasks'||prev==='schedule'||prev==='mail'||prev==='miuv') applyExclusiveWidget(prev);
+    else hideAllWidgets();
     setTimeout(()=> window.__ep_allow_hide_config=false, 300);
-  }catch{ try{ applyExclusiveWidget('tasks'); }catch{} }
+  }catch{ try{ hideAllWidgets(); }catch{} }
   // FIX: en list, si tras cerrar no queda nada visible, restaura el layout al instante
   try {
     if (__ep_isList()) {
@@ -10233,6 +10561,8 @@ if(!window.__epCloseDelegated){
 }
 function showConfigWidget(){
   try{ const cur = localStorage.getItem('ep_active_widget'); if(cur && cur!=='config') localStorage.setItem('ep_active_widget_before_config', cur); }catch{}
+  // FIX reglas gear: mismo patron de montaje que toggleConfigWidget (el shell lateral puede no existir aun)
+  try{ if (__ep_isList()) mountListSidePanel(); else ensureEpShell(); }catch{}
   const w=getOrCreateConfigWidget();
   w.style.display='flex';
   w.style.flexDirection='column';
@@ -10250,12 +10580,13 @@ function showConfigWidget(){
 function toggleConfigWidget(){
   try{ __ep_markUserAction(); }catch{}
   window.__ep_config_open_until = Date.now() + 2500;
+  // FIX reglas gear: igual que los demas widgets - si el shell lateral no esta montado (todo cerrado), montarlo
+  try{ if (__ep_isList()) mountListSidePanel(); else ensureEpShell(); }catch{}
   const w = getOrCreateConfigWidget();
   const isOpen = w && !w.classList.contains('ep-hidden') && w.style.display!=='none' && getComputedStyle(w).display!=='none';
   if(isOpen){
-    window.__ep_allow_hide_config=true;
-    applyExclusiveWidget('miuv');
-    setTimeout(()=> window.__ep_allow_hide_config=false, 300);
+    // cerrar por toggle = MISMAS reglas que los otros widgets (restaura el anterior o colapsa)
+    hideConfigWidget();
   } else {
     try{ const cur = localStorage.getItem('ep_active_widget'); if(cur && cur!=='config') localStorage.setItem('ep_active_widget_before_config', cur); }catch{}
     applyExclusiveWidget('config');
@@ -11601,7 +11932,7 @@ function __ep_btnIndicatorSync(active) {
         } catch {}
       });
     }
-    const map = { tasks: '.ep-tasks-btn', schedule: '.ep-schedule-btn', mail: '.ep-mail-btn', miuv: '.ep-miuv-btn' };
+    const map = { tasks: '.ep-tasks-btn', schedule: '.ep-schedule-btn', mail: '.ep-mail-btn', miuv: '.ep-miuv-btn', config: '.ep-config-btn' };
     if (!active || !map[active]) {
       const old = document.querySelector('.ep-btn-indicator');
       if (old) old.style.opacity = '0';
@@ -11655,6 +11986,7 @@ function applyExclusiveWidget(active) {
   const schedBtn = document.querySelector('.ep-schedule-btn');
   const mailBtnTop = document.querySelector('.ep-mail-btn');
   const miuvBtnTop = document.querySelector('.ep-miuv-btn');
+  const cfgBtnTop = document.querySelector('.ep-config-btn');
   // Fallback por si stack no existe aún (primera carga)
   tasksList.forEach(el => {
     if (active === 'tasks') el.classList.remove('ep-hidden');
@@ -11695,6 +12027,10 @@ function applyExclusiveWidget(active) {
   if (miuvBtnTop) {
     if (active === 'miuv') { miuvBtnTop.classList.add('active', 'ep-active'); miuvBtnTop.style.background = ''; }
     else { miuvBtnTop.classList.remove('active', 'ep-active'); miuvBtnTop.style.background = ''; }
+  }
+  if (cfgBtnTop) {
+    if (active === 'config') { cfgBtnTop.classList.add('active', 'ep-active'); cfgBtnTop.style.background = ''; }
+    else { cfgBtnTop.classList.remove('active', 'ep-active'); cfgBtnTop.style.background = ''; }
   }
   setActiveWidget(active);
   try { __ep_btnIndicatorSync(active); } catch {}
@@ -14140,7 +14476,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === "urlChange") {
     if(location.pathname.includes('/page/course/list')){
       try{ document.querySelector('.ep-wrapper')?.remove(); document.querySelector('.ep-right-stack')?.remove(); unmountListSidePanel(); }catch{}
-      try{ injectTasksButton(); injectMailNotification(); injectScheduleButton(); injectMiuvButton(); }catch{}
+      try{ injectTasksButton(); injectMailNotification(); injectScheduleButton(); injectMiuvButton(); injectConfigButton(); }catch{}
       try{ if(loadEpConfig().showFacilitator) injectFacilitators(); }catch{}
     } else {
       // FIX: al navegar en la SPA Angular destruye el DOM — remonta todo, no solo tareas
@@ -14154,6 +14490,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       try{ injectMailNotification(); }catch{}
       try{ injectScheduleButton(); }catch{}
       try{ injectMiuvButton(); }catch{}
+      try{ injectConfigButton(); }catch{}
       try{ __ep_restoreActive(); }catch{}
     }
   }
@@ -15511,6 +15848,7 @@ function __ep_adoptFixedToSide(){
   setInterval(()=>{
     try{
       const _t = localStorage.getItem('accessToken');
+      if(_t){ try{ typeof __ep_bounceSnap === 'function' && __ep_bounceSnap(); }catch{} }
       if(_t && !_had){
         _had = true;
         try{ localStorage.setItem('ep_active_widget','tasks'); }catch{}
@@ -15903,6 +16241,67 @@ function injectTasksButton() {
 }
 
 /**
+ * FIX: botón de configuración en la barra topbar (m-notification) — mismo patrón
+ * que schedule/mail/tasks/miuv: paint inline + pointerdown instantáneo con
+ * captura + guard de click. Abre/cierra el widget de configuración (toggleConfigWidget).
+ * OJO: el guard NO usa __ep_goodBtn('.ep-config-btn') — ese selector global también
+ * coincide con el botón del header del widget y con los botones internos del panel
+ * (#ep-accent-apply, #ep-urg-reset). El scope .m-notification se consulta aquí y en
+ * el tick de abajo; el código del widget sigue usando #ep-config-open como hago yo,
+ * así que el id duplicado es inofensivo (todas sus búsquedas son hdr/w-scoped).
+ * IGUAL que los demás 4: elemento <div> (no <button>, evita defaults UA) y svg
+ * del mismo calibre (19px, stroke 2.6) con clase .ep-config-icon para entrar en
+ * las mismas reglas de grupo (transición/hover/activo/píldora).
+ */
+function injectConfigButton() {
+  try {
+    const bar = document.querySelector('m-notification');
+    if (bar && bar.querySelector('.ep-config-btn')) return;
+  } catch {}
+  waitForNotifContainer(() => {
+    try {
+      if (document.querySelector('m-notification .ep-config-btn')) return;
+      const notifContainer = document.querySelector('m-notification .d-flex.justify-content-center.align-items-center')
+        || document.querySelector('m-notification .d-flex')
+        || document.querySelector('m-notification');
+      if (!notifContainer || notifContainer.querySelector('.ep-config-btn')) return;
+      const configBtn = document.createElement('div');
+      configBtn.className = 'ep-config-btn';
+      configBtn.id = 'ep-config-open';
+      configBtn.title = 'Configuración';
+      configBtn.setAttribute('aria-label', 'Abrir configuración');
+      configBtn.innerHTML = `
+        <svg class="ep-config-icon" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 0 0 1.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 0 0-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 0 0-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 0 0-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 0 0-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 0 0 1.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/>
+          <path d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0z"/>
+        </svg>
+      `;
+      __ep_paintBtnBox(configBtn);
+      configBtn.style.touchAction = 'manipulation';
+      const indicator = notifContainer.querySelector('.ep-btn-indicator');
+      if (indicator && indicator.parentNode === notifContainer) notifContainer.insertBefore(configBtn, indicator);
+      else notifContainer.appendChild(configBtn);
+      let _cfgPtr = false;
+      configBtn.tabIndex = 0;
+      configBtn.setAttribute('role', 'button');
+      configBtn.addEventListener('pointerdown', (e) => {
+        if (e.button !== 0) return;
+        e.preventDefault(); e.stopPropagation();
+        _cfgPtr = true;
+        try { configBtn.setPointerCapture(e.pointerId); } catch {}
+        toggleConfigWidget();
+        setTimeout(() => _cfgPtr = false, 400);
+      });
+      configBtn.addEventListener('click', (e) => {
+        if (_cfgPtr) { e.preventDefault(); e.stopPropagation(); return; }
+        e.preventDefault(); e.stopPropagation(); toggleConfigWidget();
+      });
+      configBtn.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleConfigWidget(); }});
+    } catch (e) { try { console.warn('[EP] injectConfigButton error', e); } catch {} }
+  });
+}
+
+/**
  * Fetches and parses the schedule HTML from dsiapes.uv.mx
  */
 async function loadSchedule(panel) {
@@ -16222,6 +16621,115 @@ async function loadSchedule(panel) {
 // lo usa para auto-login silencioso MiUV. Nunca se envía a servidor externo.
 // Se limpia cuando Eminus cierra sesión — recaptura en próximo login.
 
+// [EP-DIAG] Instrumentación de login (prefijo [EP-LOGIN]): distingue con evidencia la causa
+// de reintentos: (a) submit nativo + recarga, (b) POST al backend rechazado/repetido,
+// (c) validación Angular aún inválida al clicar. No modifica flujo, solo lectura.
+function __ep_loginDiag() {
+  if (window.__epLoginDiagInstalled) return;
+  window.__epLoginDiagInstalled = true;
+  const L = (...a) => { try { console.log('[EP-LOGIN]', ...a); } catch {} };
+  // 1) fetch POST a endpoints de login: se envía? status? cuántas veces?
+  try {
+    const of = window.fetch;
+    if (of && !window.__epFetchHooked) {
+      window.__epFetchHooked = true;
+      window.fetch = function (input, init) {
+        const url = (typeof input === 'string' ? input : (input && input.url) || '');
+        const p = of.apply(this, arguments);
+        if (/login|autentic|token|sesion|session/i.test(url) && init && /POST/i.test(init.method || 'GET')) {
+          p.then(r => L('fetch POST', url.slice(0, 140), '→', r.status)).catch(err => L('fetch POST err', url.slice(0, 140), err && err.message));
+        }
+        return p;
+      };
+    }
+  } catch {}
+  L('diag instalada');
+  // 2) click en Iniciar sesión: estado Angular 150ms después
+  document.addEventListener('click', (e) => {
+    const t = e.target && e.target.closest ? e.target.closest('button') : null;
+    if (t && /iniciar sesi/i.test(t.textContent || '')) {
+      L('click botón', 'enForm=' + !!t.closest('form'), 'type=' + t.getAttribute('type'), 'disabled=' + t.disabled);
+      setTimeout(() => {
+        try {
+          const f = document.querySelector('form.m-login__form');
+          const u = document.querySelector('input[name="username"]');
+          const vf = u ? u.closest('form') : null;
+          const p = vf && vf.querySelector('input[name="password"]');
+          L('t+150ms', 'form=' + (f ? f.className : 'SIN-FORM'), '| user=' + (u ? u.className : '?'), '| pass=' + (p ? p.className.replace(/ng-tns\S+/g, '').trim() : '?'), '| clickPrevented=' + e.defaultPrevented);
+        } catch (x) { L('estado err', x && x.message); }
+      }, 150);
+    }
+  }, true);
+  // 3) submit nativo del form (Enter en campos): ¿prevented o recarga?
+  document.addEventListener('submit', (e) => {
+    const f = e.target;
+    if (!(f && f.matches && f.matches('form.m-login__form'))) return;
+    L('submit nativo', 'defaultPrevented=' + e.defaultPrevented);
+    setTimeout(() => L('submit t+50ms', 'defaultPrevented=' + e.defaultPrevented, '| url=' + location.href), 50);
+  }, true);
+  // 4) Enter en campos del login (posible submit nativo → recarga completa)
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    const t = e.target;
+    const f = t && t.closest ? t.closest('form.m-login__form') : null;
+    if (!f) return;
+    const u = f.querySelector('input[name="username"]');
+    const p = f.querySelector('input[name="password"]');
+    L('keydown Enter', 'field=' + ((t && t.name) || '?'), 'userLen=' + (u ? String(u.value || '').length : -1), 'passLen=' + (p ? String(p.value || '').length : -1), 'formState=' + (f.className.includes('ng-invalid') ? 'INVALID' : 'valid'));
+  }, true);
+  // 5) XHR de auth (Angular usa XMLHttpRequest, no fetch): URL + status final de CADA intento
+  try {
+    if (!XMLHttpRequest.prototype.__epHooked) {
+      XMLHttpRequest.prototype.__epHooked = true;
+      const XO = XMLHttpRequest.prototype.open, XS = XMLHttpRequest.prototype.send;
+      XMLHttpRequest.prototype.open = function (m, u) {
+        try { this.__epM = m; this.__epU = String(u || ''); } catch {}
+        return XO.apply(this, arguments);
+      };
+      XMLHttpRequest.prototype.send = function () {
+        const self = this;
+        this.addEventListener('readystatechange', function () {
+          if (self.readyState !== 4) return;
+          const u = self.__epU || '';
+          if (/login|autentic|token|sesion|session/i.test(u)) L('xhr ' + (self.__epM || '?'), u.slice(0, 140), '→', self.status);
+        });
+        return XS.apply(this, arguments);
+      };
+    }
+  } catch {}
+  // 6) limpieza de storage durante el flujo (hipótesis: algo borra el token recién creado → regreso a login)
+  try {
+    if (!Storage.prototype.__epHooked) {
+      Storage.prototype.__epHooked = true;
+      const _c = Storage.prototype.clear, _r = Storage.prototype.removeItem, _s = Storage.prototype.setItem;
+      Storage.prototype.clear = function () {
+        const s = (new Error().stack || '').split('\n')[2] || '';
+        L('ls CLEAR', this === localStorage ? 'localStorage' : 'sessionStorage', s.trim().slice(0, 150));
+        return _c.apply(this, arguments);
+      };
+      Storage.prototype.removeItem = function (k) {
+        if (/token|user|login|auth|ses|ep_migrated/i.test(String(k))) {
+          const s = (new Error().stack || '').split('\n')[2] || '';
+          L('ls REMOVE', this === localStorage ? 'localStorage' : 'sessionStorage', String(k), s.trim().slice(0, 150));
+        }
+        return _r.apply(this, arguments);
+      };
+      Storage.prototype.setItem = function (k) {
+        if (String(k) === 'accessToken') {
+          const s = (new Error().stack || '').split('\n')[2] || '';
+          L('ls SET accessToken len=' + String(arguments[1] || '').length, s.trim().slice(0, 150));
+        }
+        return _s.apply(this, arguments);
+      };
+    }
+  } catch {}
+  // 7) token al iniciar y al irse la página (distancia entre intentar y tener token)
+  try { L('init', 'token=' + (localStorage.getItem('accessToken') ? 'PRESENTE' : 'ausente')); } catch {}
+  window.addEventListener('pagehide', () => {
+    try { L('pagehide', 'token=' + (localStorage.getItem('accessToken') ? 'PRESENTE' : 'ausente'), '| url=' + location.href); } catch { L('pagehide'); }
+  }, true);
+}
+
 function isEminusLoggedIn() {
   try { return !!localStorage.getItem('accessToken'); } catch { return false; }
 }
@@ -16331,6 +16839,7 @@ async function storeCapturedCreds(username, password) {
 }
 
 function setupEminusLoginCapture() {
+  try{ __ep_loginDiag(); }catch{}
   // FIX: listeners delegados a nivel documento — sobreviven a re-renders de Angular
   // (los listeners por-elemento se pierden si Angular reemplaza el botón sin reemplazar el form)
   if (!window.__epLoginDelegated) {
@@ -16353,6 +16862,17 @@ function setupEminusLoginCapture() {
         // FIX default abierto en login: al iniciar sesión, el widget de tareas queda abierto
         try{ localStorage.setItem('ep_active_widget','tasks'); }catch{}
         storeCapturedCreds(u, p);
+        // Poll rapido: snapshot en cuanto asome el token (el limpiador del sitio
+        // puede ejecutarse antes que el tick de 500ms del watcher)
+        try{
+          const t0 = Date.now();
+          const iv = setInterval(() => {
+            let tok = null;
+            try{ tok = localStorage.getItem('accessToken'); }catch{}
+            if(tok){ clearInterval(iv); try{ __ep_bounceSnap(); }catch{} }
+            else if(Date.now() - t0 > 20000){ clearInterval(iv); }
+          }, 100);
+        }catch{}
         setTimeout(() => { try { chrome.runtime.sendMessage({ action: 'getCredentials' }, r => console.log('[EP] login creds guardadas:', !!(r && r.creds && r.creds.username))); } catch {} }, 600);
       } catch {}
     };
@@ -16916,7 +17436,7 @@ if(__ep_isCoursePage()){
                   try{ setupAppleCTADelegation(); }catch{}
                   waitForNotifContainer(() => {
                     try{ if(__ep_isLogin()) return; }catch{}
-                    injectTasksButton(); injectMailNotification(); injectScheduleButton(); injectMiuvButton();
+                    injectTasksButton(); injectMailNotification(); injectScheduleButton(); injectMiuvButton(); injectConfigButton();
                   });
                   return;
 }
@@ -16982,7 +17502,7 @@ if(location.pathname.includes('/page/course/list')){
                   // FIX SISTÉMICO: espera a que Angular renderice el contenedor interno de m-notification
     waitForNotifContainer(() => {
       try{ if(__ep_isLogin()) return; }catch{}
-      injectTasksButton(); injectMailNotification(); injectScheduleButton(); injectMiuvButton();
+      injectTasksButton(); injectMailNotification(); injectScheduleButton(); injectMiuvButton(); injectConfigButton();
     });
     // FIX velocidad: el panel NO espera al topbar — restaura en cuanto existe el contenido (en paralelo)
     waitForListContent(() => {
@@ -17067,7 +17587,7 @@ if(location.pathname.includes('/page/course/list')){
       injectMailNotification();
       injectScheduleButton();
       injectMiuvButton();
-      // FIX: restaura AQUÍ dentro (si m-notification tardó, el de fuera corrió sin widgets)
+      injectConfigButton();      // FIX: restaura AQUÍ dentro (si m-notification tardó, el de fuera corrió sin widgets)
       try { __ep_restoreActive(); } catch {}
     });
     // FIX persistencia: los shells ya existen aquí — restaura el abierto + dispara su carga
@@ -17226,6 +17746,7 @@ if(location.pathname.includes('/page/course/list')){
       try { if (!__ep_goodBtn('.ep-mail-bar')) injectMailNotification(); } catch (e) { try { window.__ep_last_err = { at: Date.now(), where: 'tick-mail', msg: String(e && e.message) }; } catch {} }
       try { if (!__ep_goodBtn('.ep-schedule-btn')) injectScheduleButton(); } catch (e) { try { window.__ep_last_err = { at: Date.now(), where: 'tick-schedule', msg: String(e && e.message) }; } catch {} }
       try { if (!__ep_goodBtn('.ep-miuv-btn')) injectMiuvButton(); } catch (e) { try { window.__ep_last_err = { at: Date.now(), where: 'tick-miuv', msg: String(e && e.message) }; } catch {} }
+      try { if (!__ep_goodBtn('m-notification .ep-config-btn')) injectConfigButton(); } catch (e) { try { window.__ep_last_err = { at: Date.now(), where: 'tick-config', msg: String(e && e.message) }; } catch {} }
       // Limpia panels huérfanos legacy si quedaron (defensa) — ahora son display:none global
       const legacyMailPanel = document.querySelector('.ep-mail-panel');
       if (legacyMailPanel && !legacyMailPanel.closest('.ep-mail-widget')) {
