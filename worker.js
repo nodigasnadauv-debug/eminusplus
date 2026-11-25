@@ -9,8 +9,9 @@ function isThinkingLeak(s){ return /The user wants a one-sentence summary|Based 
 async function callGroq(env, prompt, isQA) {
   if (!env.GROQ_API_KEY) return { err: "no-groq-key" };
   const sys = "Eres tutor académico de Eminus Plus. Respondes SIEMPRE en español, claro y directo, con formato markdown breve (encabezados y listas cuando ayude). Nunca muestres procesos internos ni texto en inglés.";
-  // Modelos Groq verificados: llama-3.3-70b-versatile (best quality), llama-3.1-8b-instant (fastest), mixtral-8x7b-32768
-  const models = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"];
+  // Modelos Groq developer/free tier (2026): los llama y mixtral pasaron a Enterprise/decommissioned.
+  // gpt-oss-120b = mejor calidad; gpt-oss-20b = mas rapido y barato; qwen3.8 = fallback preview.
+  const models = ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"];
   const errs = [];
   // FIX vercel: presupuesto TOTAL de la cascada (~22s). En Vercel Edge una cascada puede morir a mitad.
   const t0 = Date.now();
@@ -103,7 +104,8 @@ export default {
           DISCORD_WEBHOOK: (env.DISCORD_WEBHOOK_URL || env.DISCORD_SUGGEST_WEBHOOK) ? "SET" : "MISSING ❌"
         },
         groq: {
-          models: ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"],
+          models: ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"],
+          modelsNote: "llama/mixtral retirados o Enterprise en Groq 2026; los actuales son gpt-oss + qwen",
           cacheEntries: _cache.size,
           suggestLimitIPs: _suggestLimit.size,
           summLimitIPs: _summLimit.size
