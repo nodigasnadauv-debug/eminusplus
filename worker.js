@@ -55,8 +55,9 @@ async function callGroq(env, prompt, isQA) {
       if (!text) { errs.push(`groq reminder-only ${m}`); continue; }
       if (isThinkingLeak(text)) { errs.push(`groq thinking-leak ${m}`); continue; }
       return { text, model: m };
-    } catch (e) { clearTimeout(t); errs.push(`groq ${m}: ${e.name === "AbortError" ? "timeout" : (e.message || e)}`); }
+    } catch (e) { clearTimeout(t); const errMsg = e.name === "AbortError" ? "timeout" : (e.message || e); errs.push(`groq ${m}: ${errMsg}`); console.error('[GROQ-MODEL-ERR]', m, errMsg); }
   }
+  console.error('[GROQ-ALL-FAILED]', errs.join(' | '));
   return { err: errs.join(" | ") || "groq-failed" };
 }
 
@@ -259,6 +260,8 @@ export default {
       if (_cache.has(hk2)) {
         return new Response(JSON.stringify({ summary: _cache.get(hk2), cached: true }), { headers: { ...cors, "Content-Type": "application/json" } });
       }
+      // DEBUG: loguea el error real de Groq en Vercel Functions Logs
+      console.error('[GROQ-ERROR]', lastErr, '| cache?', _cache.has(hk2), '| clean[:80]', clean.slice(0,80));
       return new Response(JSON.stringify({ error: "IA no disponible — Groq falló, reintenta en unos segundos", lastErr }), { status: 502, headers: { ...cors, "Content-Type": "application/json" } });
 
     } catch (e) {
