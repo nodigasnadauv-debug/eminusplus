@@ -1,0 +1,420 @@
+﻿/* Design Tokens as CSS Custom Properties */
+/* Generated from assets/design-tokens/*.json */
+/* Do not edit directly - regenerate from tokens */
+
+:root {
+  /* ===========================================
+     COLOR - Primitive (Raw Hues)
+     =========================================== */
+  /* Brand - Blue */
+  --color-primitive-brand-50: #eff6ff;
+  --color-primitive-brand-100: #dbeafe;
+  --color-primitive-brand-200: #bfdbfe;
+  --color-primitive-brand-300: #93c5fd;
+  --color-primitive-brand-400: #60a5fa;
+  --color-primitive-brand-500: #3b82f6;
+  --color-primitive-brand-600: #2563eb;
+  --color-primitive-brand-700: #1d4ed8;
+  --color-primitive-brand-800: #1e40af;
+  --color-primitive-brand-900: #1e3a8a;
+  --color-primitive-brand-950: #172554;
+
+  /* Brand Secondary - Purple/Pink */
+  --color-primitive-brandSecondary-50: #fdf4ff;
+  --color-primitive-brandSecondary-100: #fae8ff;
+  --color-primitive-brandSecondary-200: #f5d0fe;
+  --color-primitive-brandSecondary-300: #f0abfc;
+  --color-primitive-brandSecondary-400: #e879f9;
+  --color-primitive-brandSecondary-500: #d946ef;
+  --color-primitive-brandSecondary-600: #c026d3;
+  --color-primitive-brandSecondary-700: #a21caf;
+  --color-primitive-brandSecondary-800: #86198f;
+  --color-primitive-brandSecondary-900: #701a75;
+  --color-primitive-brandSecondary-950: #4a044e;
+
+  /* Neutral - Cool Gray */
+  --color-primitive-neutral-50: #fafafa;
+  --color-primitive-neutral-100: #f4f4f5;
+  --color-primitive-neutral-200: #e4e4e7;
+  --color-primitive-neutral-300: #d4d4d8;
+  --color-primitive-neutral-400: #a1a1aa;
+  --color-primitive-neutral-500: #71717a;
+  --color-primitive-neutral-600: #52525b;
+  --color-primitive-neutral-700: #3f3f46;
+  --color-primitive-neutral-800: #27272a;
+  --color-primitive-neutral-900: #18181b;
+  --color-primitive-neutral-950: #09090b;
+
+  /* Neutral Warm - Stone */
+  --color-primitive-neutralWarm-50: #fafaf9;
+  --color-primitive-neutralWarm-100: #f5f5f4;
+  --color-primitive-neutralWarm-200: #e7e5e4;
+  --color-primitive-neutralWarm-300: #d6d3d1;
+  --color-primitive-neutralWarm-400: #a8a29e;
+  --color-primitive-neutralWarm-500: #78716c;
+  --color-primitive-neutralWarm-600: #57534e;
+  --color-primitive-neutralWarm-700: #44403c;
+  --color-primitive-neutralWarm-800: #292524;
+  --color-primitive-neutralWarm-900: #1c1917;
+  --color-primitive-neutralWarm-950: #0c0a09;
+
+  /* Status Colors */
+  --color-primitive-success-50: #f0fdf4;
+  --color-primitive-success-100: #dcfce7;
+  --color-primitive-success-200: #bbf7d0;
+  --color-primitive-success-300: #86efac;
+  --color-primitive-success-400: #4ade80;
+  --color-primitive-success-500: #22c55e;
+  --color-primitive-success-600: #16a34a;
+  --color-primitive-success-700: #15803d;
+  --color-primitive-success-800: #166534;
+  --color-primitive-success-900: #14532d;
+  --color-primitive-success-950: #052e16;
+
+  --color-primitive-warning-50: #fffbeb;
+  --color-primitive-warning-100: #fef3c7;
+  --color-primitive-warning-200: #fde68a;
+  --color-primitive-warning-300: #fcd34d;
+  --color-primitive-warning-400: #fbbf24;
+  --color-primitive-warning-500: #f59e0b;
+  --color-primitive-warning-600: #d97706;
+  --color-primitive-warning-700: #b45309;
+  --color-primitive-warning-800: #92400e;
+  --color-primitive-warning-900: #78350f;
+  --color-primitive-warning-950: #451a03;
+
+  --color-primitive-error-50: #fef2f2;
+  --color-primitive-error-100: #fee2e2;
+  --color-primitive-error-200: #fecaca;
+  --color-primitive-error-300: #fca5a5;
+  --color-primitive-error-400: #f87171;
+  --color-primitive-error-500: #ef4444;
+  --color-primitive-error-600: #dc2626;
+  --color-primitive-error-700: #b91c1c;
+  --color-primitive-error-800: #991b1b;
+  --color-primitive-error-900: #7f1d1d;
+  --color-primitive-error-950: #450a0a;
+
+  --color-primitive-info-50: #eff6ff;
+  --color-primitive-info-100: #dbeafe;
+  --color-primitive-info-200: #bfdbfe;
+  --color-primitive-info-300: #93c5fd;
+  --color-primitive-info-400: #60a5fa;
+  --color-primitive-info-500: #3b82f6;
+  --color-primitive-info-600: #2563eb;
+  --color-primitive-info-700: #1d4ed8;
+  --color-primitive-info-800: #1e40af;
+  --color-primitive-info-900: #1e3a8a;
+  --color-primitive-info-950: #172554;
+
+  --color-primitive-white: #ffffff;
+  --color-primitive-black: #000000;
+
+  /* ===========================================
+     COLOR - Semantic (Purpose-Driven)
+     =========================================== */
+  /* Primary Brand */
+  --color-primary: var(--color-primitive-brand-600);
+  --color-primary-hover: var(--color-primitive-brand-700);
+  --color-primary-active: var(--color-primitive-brand-800);
+  --color-primary-subtle: var(--color-primitive-brand-100);
+  --color-on-primary: var(--color-primitive-white);
+
+  /* Secondary Brand */
+  --color-secondary: var(--color-primitive-brandSecondary-600);
+  --color-secondary-hover: var(--color-primitive-brandSecondary-700);
+  --color-secondary-subtle: var(--color-primitive-brandSecondary-100);
+
+  /* Surfaces */
+  --color-surface: var(--color-primitive-white);
+  --color-surface-raised: var(--color-primitive-white);
+  --color-surface-sunken: var(--color-primitive-neutral-50);
+  --color-surface-overlay: rgba(0, 0, 0, 0.5);
+
+  /* Backgrounds */
+  --color-background: var(--color-primitive-neutral-50);
+  --color-background-subtle: var(--color-primitive-neutral-100);
+  --color-background-inverse: var(--color-primitive-neutral-900);
+
+  /* Content/Text */
+  --color-content-primary: var(--color-primitive-neutral-900);
+  --color-content-secondary: var(--color-primitive-neutral-600);
+  --color-content-tertiary: var(--color-primitive-neutral-400);
+  --color-content-inverse: var(--color-primitive-white);
+  --color-content-disabled: var(--color-primitive-neutral-300);
+
+  /* Borders */
+  --color-border: var(--color-primitive-neutral-200);
+  --color-border-strong: var(--color-primitive-neutral-300);
+  --color-border-focus: var(--color-primitive-brand-500);
+  --color-border-error: var(--color-primitive-error-500);
+
+  /* Status */
+  --color-status-success: var(--color-primitive-success-600);
+  --color-status-success-subtle: var(--color-primitive-success-100);
+  --color-status-warning: var(--color-primitive-warning-600);
+  --color-status-warning-subtle: var(--color-primitive-warning-100);
+  --color-status-error: var(--color-primitive-error-600);
+  --color-status-error-subtle: var(--color-primitive-error-100);
+  --color-status-info: var(--color-primitive-info-600);
+  --color-status-info-subtle: var(--color-primitive-info-100);
+
+  /* ===========================================
+     SPACING
+     =========================================== */
+  --spacing-base: 4px;
+  --spacing-0: 0;
+  --spacing-1: 4px;
+  --spacing-2: 8px;
+  --spacing-3: 12px;
+  --spacing-4: 16px;
+  --spacing-5: 20px;
+  --spacing-6: 24px;
+  --spacing-8: 32px;
+  --spacing-10: 40px;
+  --spacing-12: 48px;
+  --spacing-16: 64px;
+  --spacing-20: 80px;
+  --spacing-24: 96px;
+  --spacing-32: 128px;
+
+  /* Semantic Spacing */
+  --spacing-none: var(--spacing-0);
+  --spacing-xs: var(--spacing-1);
+  --spacing-sm: var(--spacing-2);
+  --spacing-md: var(--spacing-4);
+  --spacing-lg: var(--spacing-6);
+  --spacing-xl: var(--spacing-8);
+  --spacing-2xl: var(--spacing-12);
+  --spacing-3xl: var(--spacing-16);
+  --spacing-4xl: var(--spacing-24);
+
+  /* Fluid Spacing */
+  --spacing-fluid-xs: clamp(0.25rem, 0.5vw, 0.5rem);
+  --spacing-fluid-sm: clamp(0.5rem, 1vw, 1rem);
+  --spacing-fluid-md: clamp(1rem, 2vw, 1.5rem);
+  --spacing-fluid-lg: clamp(1.5rem, 3vw, 2.5rem);
+  --spacing-fluid-xl: clamp(2rem, 4vw, 4rem);
+  --spacing-fluid-2xl: clamp(3rem, 6vw, 6rem);
+
+  /* ===========================================
+     TYPOGRAPHY
+     =========================================== */
+  /* Font Families */
+  --font-family-display: "Inter Variable", system-ui, sans-serif;
+  --font-family-body: "Inter Variable", system-ui, sans-serif;
+  --font-family-mono: "JetBrains Mono Variable", ui-monospace, monospace;
+
+  /* Font Weights */
+  --font-weight-light: 300;
+  --font-weight-regular: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+  --font-weight-bold: 700;
+
+  /* Font Sizes - Fluid */
+  --text-fluid-xs: clamp(0.75rem, 0.7rem + 0.25vw, 0.875rem);
+  --text-fluid-sm: clamp(0.875rem, 0.825rem + 0.25vw, 1rem);
+  --text-fluid-md: clamp(1rem, 0.925rem + 0.375vw, 1.125rem);
+  --text-fluid-lg: clamp(1.125rem, 1.025rem + 0.5vw, 1.25rem);
+  --text-fluid-xl: clamp(1.25rem, 1.1rem + 0.75vw, 1.5rem);
+  --text-fluid-2xl: clamp(1.5rem, 1.25rem + 1.25vw, 2rem);
+  --text-fluid-3xl: clamp(1.875rem, 1.5rem + 1.875vw, 2.5rem);
+  --text-fluid-4xl: clamp(2.25rem, 1.75rem + 2.5vw, 3.5rem);
+  --text-fluid-5xl: clamp(3rem, 2rem + 5vw, 5rem);
+
+  /* Font Sizes - Display Scale (Major Third 1.25) */
+  --text-display-xs: 3.052rem;
+  --text-display-sm: 3.815rem;
+  --text-display-md: 4.768rem;
+  --text-display-lg: 5.96rem;
+  --text-display-xl: 7.451rem;
+
+  /* Font Sizes - Heading Scale */
+  --text-heading-xs: 1.953rem;
+  --text-heading-sm: 2.441rem;
+  --text-heading-md: 3.052rem;
+  --text-heading-lg: 3.815rem;
+  --text-heading-xl: 4.768rem;
+
+  /* Font Sizes - Body Scale */
+  --text-body-xs: 0.8rem;
+  --text-body-sm: 0.875rem;
+  --text-body-md: 1rem;
+  --text-body-lg: 1.125rem;
+  --text-body-xl: 1.25rem;
+
+  /* Font Sizes - Label/UI Scale */
+  --text-label-xs: 0.75rem;
+  --text-label-sm: 0.8125rem;
+  --text-label-md: 0.875rem;
+  --text-label-lg: 1rem;
+
+  /* Font Sizes - Code Scale */
+  --text-code-xs: 0.75rem;
+  --text-code-sm: 0.8125rem;
+  --text-code-md: 0.875rem;
+  --text-code-lg: 1rem;
+
+  /* Line Heights */
+  --leading-tight: 1.1;
+  --leading-snug: 1.375;
+  --leading-normal: 1.5;
+  --leading-relaxed: 1.625;
+  --leading-display: 1.05;
+  --leading-heading: 1.2;
+  --leading-body: 1.6;
+  --leading-label: 1.4;
+  --leading-code: 1.6;
+
+  /* Letter Spacing */
+  --tracking-tight: -0.03em;
+  --tracking-normal: 0;
+  --tracking-wide: 0.02em;
+  --tracking-wider: 0.1em;
+  --tracking-display: -0.02em;
+  --tracking-heading: -0.01em;
+  --tracking-body: 0;
+  --tracking-label: 0.005em;
+
+  /* ===========================================
+     MOTION
+     =========================================== */
+  /* Durations */
+  --duration-instant: 0ms;
+  --duration-fast: 100ms;
+  --duration-normal: 200ms;
+  --duration-slow: 300ms;
+  --duration-slower: 500ms;
+  --duration-page: 400ms;
+
+  /* Easings */
+  --ease-linear: linear;
+  --ease-default: cubic-bezier(0.25, 0.1, 0.25, 1);
+  --ease-in: cubic-bezier(0.4, 0, 1, 1);
+  --ease-out: cubic-bezier(0, 0, 0.2, 1);
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-brand: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --ease-brand-sharp: cubic-bezier(0.4, 0, 0.6, 1);
+  --ease-brand-gentle: cubic-bezier(0.25, 0.46, 0.45, 0.94);
+
+  /* Delays */
+  --delay-none: 0ms;
+  --delay-stagger: 50ms;
+  --delay-stagger-fast: 25ms;
+  --delay-entrance: 100ms;
+
+  /* Springs (for Framer Motion/GSAP) */
+  --spring-gentle: 120 14;
+  --spring-default: 170 26;
+  --spring-stiff: 260 20;
+  --spring-bouncy: 400 30;
+
+  /* ===========================================
+     SHADOWS & ELEVATION
+     =========================================== */
+  --shadow-0: none;
+  --shadow-1: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+  --shadow-2: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px -1px rgba(0, 0, 0, 0.1);
+  --shadow-3: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1);
+  --shadow-4: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -4px rgba(0, 0, 0, 0.1);
+  --shadow-5: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1);
+
+  /* Semantic Shadows */
+  --shadow-card: var(--shadow-1);
+  --shadow-dropdown: var(--shadow-3);
+  --shadow-modal: var(--shadow-5);
+  --shadow-tooltip: var(--shadow-2);
+  --shadow-focus: 0 0 0 3px var(--color-primitive-brand-200);
+
+  /* ===========================================
+     BORDER RADIUS
+     =========================================== */
+  --radius-none: 0;
+  --radius-xs: 2px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+  --radius-2xl: 16px;
+  --radius-full: 9999px;
+
+  /* Semantic Radius */
+  --radius-button: var(--radius-md);
+  --radius-input: var(--radius-md);
+  --radius-card: var(--radius-lg);
+  --radius-modal: var(--radius-xl);
+  --radius-badge: var(--radius-full);
+  --radius-avatar: var(--radius-full);
+
+  /* ===========================================
+     Z-INDEX
+     =========================================== */
+  --z-hide: -1;
+  --z-base: 0;
+  --z-raised: 10;
+  --z-dropdown: 100;
+  --z-sticky: 200;
+  --z-overlay: 300;
+  --z-modal: 400;
+  --z-popover: 500;
+  --z-tooltip: 600;
+  --z-toast: 700;
+
+  /* ===========================================
+     BREAKPOINTS
+     =========================================== */
+  --bp-sm: 640px;
+  --bp-md: 768px;
+  --bp-lg: 1024px;
+  --bp-xl: 1280px;
+  --bp-2xl: 1536px;
+}
+
+/* ===========================================
+   DARK MODE OVERRIDES
+   =========================================== */
+@media (prefers-color-scheme: dark) {
+  :root {
+    /* Surfaces */
+    --color-surface: var(--color-primitive-neutral-900);
+    --color-surface-raised: var(--color-primitive-neutral-800);
+    --color-surface-sunken: var(--color-primitive-neutral-950);
+    
+    /* Backgrounds */
+    --color-background: var(--color-primitive-neutral-950);
+    --color-background-subtle: var(--color-primitive-neutral-900);
+    --color-background-inverse: var(--color-primitive-neutral-50);
+    
+    /* Content */
+    --color-content-primary: var(--color-primitive-neutral-50);
+    --color-content-secondary: var(--color-primitive-neutral-400);
+    --color-content-tertiary: var(--color-primitive-neutral-600);
+    
+    /* Borders */
+    --color-border: var(--color-primitive-neutral-700);
+    --color-border-strong: var(--color-primitive-neutral-600);
+    
+    /* Primary lighter in dark mode */
+    --color-primary: var(--color-primitive-brand-400);
+    --color-primary-hover: var(--color-primitive-brand-300);
+    --color-primary-subtle: var(--color-primitive-brand-900);
+    
+    /* Focus ring */
+    --shadow-focus: 0 0 0 3px var(--color-primitive-brand-800);
+  }
+}
+
+/* ===========================================
+   REDUCED MOTION
+   =========================================== */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

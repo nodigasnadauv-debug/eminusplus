@@ -1,0 +1,41 @@
+﻿{
+  "$schema": "https://design-tokens.github.io/format/#/definitions/Token",
+  "spacing": {
+    "base": { "$value": "4px", "$type": "dimension" },
+    "scale": {
+      "0": { "$value": "0", "$type": "dimension" },
+      "1": { "$value": "4px", "$type": "dimension" },
+      "2": { "$value": "8px", "$type": "dimension" },
+      "3": { "$value": "12px", "$type": "dimension" },
+      "4": { "$value": "16px", "$type": "dimension" },
+      "5": { "$value": "20px", "$type": "dimension" },
+      "6": { "$value": "24px", "$type": "dimension" },
+      "8": { "$value": "32px", "$type": "dimension" },
+      "10": { "$value": "40px", "$type": "dimension" },
+      "12": { "$value": "48px", "$type": "dimension" },
+      "16": { "$value": "64px", "$type": "dimension" },
+      "20": { "$value": "80px", "$type": "dimension" },
+      "24": { "$value": "96px", "$type": "dimension" },
+      "32": { "$value": "128px", "$type": "dimension" }
+    },
+    "semantic": {
+      "none": { "$value": "{spacing.scale.0}", "$type": "dimension" },
+      "xs": { "$value": "{spacing.scale.1}", "$type": "dimension" },
+      "sm": { "$value": "{spacing.scale.2}", "$type": "dimension" },
+      "md": { "$value": "{spacing.scale.4}", "$type": "dimension" },
+      "lg": { "$value": "{spacing.scale.6}", "$type": "dimension" },
+      "xl": { "$value": "{spacing.scale.8}", "$type": "dimension" },
+      "2xl": { "$value": "{spacing.scale.12}", "$type": "dimension" },
+      "3xl": { "$value": "{spacing.scale.16}", "$type": "dimension" },
+      "4xl": { "$value": "{spacing.scale.24}", "$type": "dimension" }
+    },
+    "fluid": {
+      "xs": { "$value": "clamp(0.25rem, 0.5vw, 0.5rem)", "$type": "dimension" },
+      "sm": { "$value": "clamp(0.5rem, 1vw, 1rem)", "$type": "dimension" },
+      "md": { "$value": "clamp(1rem, 2vw, 1.5rem)", "$type": "dimension" },
+      "lg": { "$value": "clamp(1.5rem, 3vw, 2.5rem)", "$type": "dimension" },
+      "xl": { "$value": "clamp(2rem, 4vw, 4rem)", "$type": "dimension" },
+      "2xl": { "$value": "clamp(3rem, 6vw, 6rem)", "$type": "dimension" }
+    }
+  }
+}

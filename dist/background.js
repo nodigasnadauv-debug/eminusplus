@@ -160,6 +160,8 @@ async function eminusAutoLogin(username, password){
       if(r.ok){
         const j = await r.json().catch(()=>null);
         if(j && (j.token || j.accessToken || j.access_token)){
+          // EP notif: persiste el token para que el check desde el SW pueda fetch sin pestaña abierta
+          try { const _tok = String(j.token || j.accessToken || j.access_token).replace(/^Bearer /,''); if (_tok) await chrome.storage.local.set({ ep_eminus_token: { t: _tok, ts: Date.now() } }); } catch {}
           console.log('[EP] Auto-login Eminus OK (JSON)');
           return true;
         }
@@ -289,10 +291,14 @@ async function ensureMiuvSession() {
 const WORKER_URLS = ['https://eminusplus.vercel.app', 'https://eminus.uvplus.workers.dev'];
 const EP_EXT_ORIGIN = 'chrome-extension://hhmkanfafjomoffacpahenjnehfcnhaj';
 let WORKER_URL = WORKER_URLS[0];
+// Al despertar el SW: base persistido al instante (sin esperar el probe HTTP).
+// Así la primera request ya sale al base bueno; el probe queda solo como health-check.
+try { chrome.storage.local.get(['ep_worker_base']).then(c => { const b = c && c['ep_worker_base']; if (b && WORKER_URLS.indexOf(b) !== -1) WORKER_URL = b; }).catch(() => {}); } catch {}
 let _workerProbe = null;
 function probeWorkerBase() {
-  if (_workerProbe) return _workerProbe;
-  _workerProbe = (async () => {
+  // Memo con TTL de 60 s (antes se anulaba en cada finally → sondeo HTTP en CADA request)
+  if (_workerProbe && (Date.now() - _workerProbe.ts) < 60000) return _workerProbe.p;
+  const p = (async () => {
     // Arranca con el último base que respondió bien (si el SW se reinició a mitad de sesión)
     let persisted = null;
     try {
@@ -323,54 +329,122 @@ function probeWorkerBase() {
     }
     if (WORKER_URL !== WORKER_URLS[0]) try { await chrome.storage.local.set({ 'ep_worker_base': WORKER_URL }); } catch {}
     return WORKER_URL;
-  })().finally(() => { _workerProbe = null; });
-  return _workerProbe;
+  })();
+  _workerProbe = { p, ts: Date.now() };
+  return p;
 }
 
 // Resumen IA vía Worker proxy (key nunca en cliente)
 // El Worker guarda GEMINI_API_KEY como secret y llama a Gemini
 // timeoutMs paramétrico: el asistente (cascada de modelos) necesita más aire que un resumen
 async function summarizeViaWorker(description, timeoutMs) {
-  await probeWorkerBase();
-  const controller = new AbortController();
-  const t = setTimeout(() => controller.abort(), timeoutMs || 9000);
-  try {
-    // Intenta endpoint /api/summarize primero, fallback a /api/description por compat
-    const payload = JSON.stringify({ description });
-    let res = await fetch(`${WORKER_URL}/api/summarize`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Origin: EP_EXT_ORIGIN },
-      body: payload,
-      signal: controller.signal
-    });
-    if (!res.ok && (res.status===404 || res.status===405)) {
-      // FIX: solo fallback en 404/405 (compat) — antes hacía doble fetch incluso en 400/429 desperdiciando 12s y trabando
-      res = await fetch(`${WORKER_URL}/api/description`, {
+  // Health-check en paralelo, NUNCA bloqueando: el sondeo podía clavar 0-8 s antes de
+  // llamar a Gemini. WORKER_URL ya viene del storage (arranque del SW); si el base está
+  // muerto, la cascada de abajo prueba el otro igual.
+  try { probeWorkerBase().catch(() => {}); } catch {}
+  const payload = JSON.stringify({ description });
+  // Un intento completo en un base: /api/summarize primero, /api/description por
+  // compat SOLO en 404/405. Mismo timeoutMs por intento (presupuesto simple).
+  const attemptBase = async (base) => {
+    const controller = new AbortController();
+    const t = setTimeout(() => controller.abort(), timeoutMs || 9000);
+    try {
+      let res = await fetch(`${base}/api/summarize`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Origin: EP_EXT_ORIGIN },
         body: payload,
         signal: controller.signal
       });
-    }
-    if (!res.ok) {
-      const errBody = await res.text().catch(() => "");
-      try {
-        const ej = JSON.parse(errBody);
-        const detail = ej.lastErr || ej.error || errBody;
-        throw new Error('Worker HTTP ' + res.status + ' — ' + String(detail).slice(0, 300));
-      } catch (e) {
-        if (e.message && e.message.startsWith('Worker HTTP')) throw e;
-        throw new Error('Worker HTTP ' + res.status + ' — ' + errBody.slice(0, 300));
+      if (!res.ok && (res.status===404 || res.status===405)) {
+        // FIX: solo fallback en 404/405 (compat) — antes hacía doble fetch incluso en 400/429 desperdiciando 12s y trabando
+        res = await fetch(`${base}/api/description`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Origin: EP_EXT_ORIGIN },
+          body: payload,
+          signal: controller.signal
+        });
       }
-    }
-    const raw = await res.text();
-    try {
-      const j = JSON.parse(raw);
-      if (j.summary) return String(j.summary).trim();
-      if (j.answer) return String(j.answer).trim();
-      return raw.trim() || 'Sin descripción';
-    } catch { return raw.trim() || 'Sin descripción'; }
-  } finally { clearTimeout(t); }
+      if (!res.ok) {
+        const errBody = await res.text().catch(() => "");
+        try {
+          const ej = JSON.parse(errBody);
+          const detail = ej.lastErr || ej.error || errBody;
+          throw new Error('Worker HTTP ' + res.status + ' — ' + String(detail).slice(0, 300));
+        } catch (e) {
+          if (e.message && e.message.startsWith('Worker HTTP')) throw e;
+          throw new Error('Worker HTTP ' + res.status + ' — ' + errBody.slice(0, 300));
+        }
+      }
+      const raw = await res.text();
+      try {
+        const j = JSON.parse(raw);
+        if (j.summary) return String(j.summary).trim();
+        if (j.answer) return String(j.answer).trim();
+        return raw.trim() || 'Sin descripción';
+      } catch { return raw.trim() || 'Sin descripción'; }
+    } finally { clearTimeout(t); }
+  };
+  // FIX RESUMEN 13-nov-2026: Vercel puede tener / y /api/unlock sanos pero
+  // /api/summarize sin GEMINI_API_KEY (500 'no configurada'). En ese caso prueba UNA
+  // vez el/los otros bases (en orden, saltando el que falló). Si el respaldo funciona,
+  // fija y persiste el base (mismo patrón que unlock). El probe/unlock siguen volviendo
+  // solos a Vercel cuando esté sano, así que no hay ping-pong.
+  // FIX TIMEOUT 13-nov-2026: un abort por timeout (AbortError) es transitorio igual que
+  // un 5xx — el otro base puede responder. 4xx real (400/429) sigue sin reintentar.
+  const isTimeoutErr = (err) => {
+    if (err && (err.name === 'AbortError' || err.name === 'TimeoutError')) return true;
+    const msg = String((err && err.message) || '').toLowerCase();
+    return msg.indexOf('abort') !== -1 || msg.indexOf('timeout') !== -1;
+  };
+  const deservesFallback = (err) => {
+    const msg = String((err && err.message) || '');
+    const m = msg.match(/^Worker HTTP (\d{3})/);
+    const status = m ? parseInt(m[1], 10) : 0;
+    // 4xx real del Worker (400/429/…): nunca reintentar, aunque el detalle mencione timeout
+    if (m && status < 500) return false;
+    return status >= 500 || isTimeoutErr(err) || msg.indexOf('no-gemini-key') !== -1 || msg.indexOf('no configurada') !== -1;
+  };
+  const order = [WORKER_URL];
+  for (const b of WORKER_URLS) { if (b !== WORKER_URL) order.push(b); }
+  let lastErr = null;
+  // Carrera escalonada: principal primero; si a los 3.5 s no hay respuesta, el respaldo
+  // corre en paralelo y gana el primero que conteste. En el caso común (principal sano)
+  // NO hay segunda llamada; en frío lento corta la cola en vez de esperar el timeout.
+  const persistFallback = (base) => {
+    console.log('[EP] summarize fallback a respaldo: ' + base);
+    WORKER_URL = base;
+    try { chrome.storage.local.set({ 'ep_worker_base': base }).catch(() => {}); } catch {}
+  };
+  const race = () => new Promise((resolve, reject) => {
+    let settled = false, hedge = false;
+    const settle = (fn, arg) => { if (!settled) { settled = true; fn(arg); } };
+    const startHedge = () => {
+      if (hedge || settled || order.length < 2) return;
+      hedge = true;
+      attemptBase(order[1]).then(out => { persistFallback(order[1]); settle(resolve, out); })
+        .catch(e2 => { lastErr = e2; settle(reject, e2); });
+    };
+    attemptBase(order[0]).then(out => settle(resolve, out))
+      .catch(e => {
+        lastErr = e;
+        // Error no-rescatable (4xx real): muere sin gastar el respaldo, como antes
+        if (!deservesFallback(e)) { settle(reject, e); return; }
+        startHedge();
+      });
+    setTimeout(() => { if (!settled) startHedge(); }, 3500);
+  });
+  try {
+    return await race();
+  } catch (e) {
+    lastErr = e;
+  }
+  // Todos los bases fallaron: propaga el ÚLTIMO error (misma forma 'Worker HTTP ...').
+  // Si fue timeout/abort en ambos bases, el mensaje final es accionable para el usuario
+  // (main.js muestra cualquier texto que NO empiece por 'IA no disponible').
+  if (isTimeoutErr(lastErr) && !/^Worker HTTP/.test(String((lastErr && lastErr.message) || ''))) {
+    throw new Error('IA tardó demasiado (timeout) — reintenta');
+  }
+  throw lastErr;
 }
 
 // Rutas internas protegidas: solo existen descifradas en memoria tras validar
@@ -903,7 +977,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ summary: cached[cacheKey], cached: true });
         return;
       }
-      summarizeViaWorker(description || '')
+      // FIX TIMEOUT: descripciones reales (hasta 4000 chars) + arranque en frío del worker
+      // + cascada de modelos pueden pasar de 9s — presupuesto 45s con reintentos por timeout
+      summarizeViaWorker(description || '', 45000)
         .then(summary => {
           const toCache = {};
           toCache[cacheKey] = summary;
@@ -1372,5 +1448,461 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  // ===== EP notificaciones: estado y prueba (la campana vive en cada tarjeta) =====
+  if (message.action === 'epNotifStatus') {
+    epnReadSettings().then(s => sendResponse({ settings: s })).catch(e => sendResponse({ error: e && e.message }));
+    return true;
+  }
+  if (message.action === 'epNotifTest') {
+    try {
+      epnNotify('epn-test-' + Date.now(), 'Notificaciones activas', 'Eminus Plus te avisará cuando una tarea esté por vencer.', { kind: 'test' });
+      sendResponse({ ok: true });
+    } catch (e) { sendResponse({ ok: false, error: (e && e.message) || 'error' }); }
+    return true;
+  }
+  if (message.action === 'epNotifCheck') {
+    checkDueTasks('manual').then(() => sendResponse({ ok: true })).catch(e => sendResponse({ error: e && e.message }));
+    return true;
+  }
+  // Instantáneo: la pestaña de Eminus ya trajo la lista fresca de tareas (el fetch del widget);
+  // se la pasa al SW para detectar nuevas SIN llamar de nuevo al API.
+  if (message.action === 'epNotifActivitiesFresh') {
+    const items = Array.isArray(message.items) ? message.items : null;
+    if (items && items.length) {
+      try { checkDueTasks('fresh-tab', items).catch(() => {}); } catch {}
+      sendResponse({ ok: true });
+    } else sendResponse({ ok: false });
+    return true;
+  }
+
   return true;
 });
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// EP Notificaciones — vence pronto (campana) + tareas nuevas
+// Pipeline: chrome.alarms (15 min) + onStartup despiertan el SW → checkDueTasks():
+// token (storage/cookie → auto-login) → cursos+actividades → pendientes →
+// diff de nuevas (idActividad) + umbrales de vencimiento (24/6/1 h editables).
+// Chrome totalmente cerrado = el proceso de la extensión no corre (límite MV3).
+// ═══════════════════════════════════════════════════════════════════════════════
+const EP_EMINUS_BASE = 'https://eminus.uv.mx';
+const EPN_ALARM = 'ep-due-check';
+const EPN_ALARM_STARTUP_RETRY = 'ep-due-check-startup-retry';
+const EPN_DEF_THRESHOLDS = [24, 6, 1];
+const EPN_VALID_THRESHOLDS = [1, 6, 12, 24];
+
+async function epnReadSettings() {
+  let c = {};
+  try { const r = await chrome.storage.local.get(['ep_cfg']); if (r && r.ep_cfg && typeof r.ep_cfg === 'object') c = r.ep_cfg; } catch {}
+  let th = Array.isArray(c.notifThresholds)
+    ? [...new Set(c.notifThresholds.map(Number).filter(h => EPN_VALID_THRESHOLDS.includes(h)))]
+    : null;
+  // Campana por tarjeta: mapa idActividad → true (escrito por el content script)
+  let tasks = {};
+  try {
+    const r = await chrome.storage.local.get(['ep_notif_tasks_v1']);
+    const t = r && r.ep_notif_tasks_v1;
+    if (t && typeof t === 'object' && !Array.isArray(t)) tasks = t;
+  } catch {}
+  return {
+    bell: !!c.notifBell,
+    // Default = activado (igual que EP_DEFAULT_CONFIG): sin config guardada, avisa tareas nuevas
+    newTasks: c.notifNew === undefined ? true : !!c.notifNew,
+    tasks,
+    thresholds: (th && th.length) ? th.sort((a, b) => b - a) : EPN_DEF_THRESHOLDS.slice()
+  };
+}
+
+// Copy centralizada de notificaciones (premium, sin emojis): la tarea en el título,
+// dato puro en el mensaje, categoría en contextMessage, botón único "Abrir tarea".
+function epnTrunc(s, n) {
+  s = String(s || '').replace(/\s+/g, ' ').trim();
+  return s.length > n ? s.slice(0, n - 1).trimEnd() + '…' : s;
+}
+
+// Nid enrutable: epn-{new|due}-{courseId}-{idActividad}[-{umbral}] — sobrevive al sleep
+// del SW (el clic se parsea del id, sin storage intermedio).
+function epnNotify(id, title, message, meta) {
+  try {
+    const m = meta || {};
+    const kindCtx = { new: 'Eminus Plus · Nueva tarea', due: 'Eminus Plus · Recordatorio', test: 'Eminus Plus' }[m.kind] || 'Eminus Plus';
+    const opts = {
+      type: 'basic',
+      iconUrl: chrome.runtime.getURL('assets/icon128.png'),
+      title: epnTrunc(title, 64),
+      message: String(message || ''),
+      contextMessage: kindCtx,
+      priority: (m.kind === 'due' && Number(m.leftMs) <= 6 * 3600 * 1000) ? 2 : 1
+    };
+    if (m.courseId != null && m.idActividad != null) opts.buttons = [{ title: 'Abrir tarea' }];
+    chrome.notifications.create(String(id), opts, () => { void chrome.runtime.lastError; });
+  } catch {}
+}
+
+function epnFmtLeft(ms) {
+  const m = Math.max(1, Math.round(ms / 60000));
+  if (m < 60) return m + ' min';
+  if (m < 48 * 60) {
+    const h = Math.floor(m / 60), rem = m % 60;
+    return rem ? (h + ' h ' + rem + ' min') : (h + ' h');
+  }
+  return Math.round(m / 1440) + ' días';
+}
+
+// Decodifica el exp del JWT (base64url, segundos). 0 si no se puede.
+function epnJwtExp(tok) {
+  try {
+    const parts = String(tok || '').split('.');
+    if (parts.length < 3) return 0;
+    let b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    while (b64.length % 4) b64 += '=';
+    const j = JSON.parse(atob(b64));
+    const e = j && (j.exp || j.expires || j.expire);
+    return e ? Number(e) * 1000 : 0;
+  } catch { return 0; }
+}
+
+async function epnGetToken() {
+  // 1) token capturado por el auto-login. Preciso: el vencimiento REAL del JWT manda;
+  //    si no se puede decodificar, cae a la ventana de confianza de 12 h desde su captura.
+  try {
+    const r = await chrome.storage.local.get(['ep_eminus_token']);
+    const t = r && r.ep_eminus_token;
+    if (t && t.t) {
+      const exp = epnJwtExp(t.t);
+      if (exp) { if (Date.now() < exp - 60 * 1000) return String(t.t); }
+      else if ((Date.now() - (t.ts || 0)) < 12 * 60 * 60 * 1000) return String(t.t);
+    }
+  } catch {}
+  // 2) cookie del portal (misma heurística que getBearerTokenFromCookies)
+  try {
+    const cookies = await chrome.cookies.getAll({ url: EP_EMINUS_BASE });
+    const c = cookies.find(k => k.name === 'EminusAuth' || k.name === 'Authorization' || k.name === 'token' || (k.value || '').includes('Bearer'));
+    if (c) {
+      let t = String(c.value || '');
+      if (t.startsWith('Bearer ')) t = t.slice(7);
+      if (t) return t;
+    }
+  } catch {}
+  return null;
+}
+
+async function epnLoginRefresh() {
+  try {
+    const creds = await getStoredCreds();
+    if (creds && creds.username && creds.password) {
+      console.log('[EP] notif: refresca sesión Eminus con', creds.username);
+      await eminusAutoLogin(creds.username, creds.password);
+    }
+  } catch (e) { console.warn('[EP] notif: auto-login falló', e && e.message); }
+}
+
+async function epnApi(tok, path, referer) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort('timeout'), 12000);
+  try {
+    return await fetch(EP_EMINUS_BASE + path, {
+      method: 'GET',
+      credentials: 'include',
+      headers: {
+        'authorization': 'Bearer ' + tok,
+        'referer': referer || EP_EMINUS_BASE + '/eminus4/page/course/list',
+        'accept': 'application/json, text/plain, */*'
+      },
+      signal: ctrl.signal
+    });
+  } finally { clearTimeout(t); }
+}
+
+// Cursos activos → actividades pendientes por curso (misma semántica que el widget:
+// archivado===0, fechaTermino > now-30d; !estadoEntrega; la lista filtra vencidas aparte)
+async function epnFetchPendingActivities() {
+  let tok = await epnGetToken();
+  if (!tok) { await epnLoginRefresh(); tok = await epnGetToken(); }
+  if (!tok) { console.log('[EP] notif: sin token y sin credenciales útiles — imposible revisar sin pestaña abierta'); return null; }
+  let courses = null;
+  try {
+    let r = await epnApi(tok, '/eminusapi/api/Cursos/getAllCourses');
+    if (r.status === 401) {
+      console.log('[EP] notif: 401 → refresca sesión y reintenta');
+      await epnLoginRefresh();
+      tok = await epnGetToken();
+      if (tok) r = await epnApi(tok, '/eminusapi/api/Cursos/getAllCourses');
+      else console.log('[EP] notif: refresh no produjo token nuevo');
+    }
+    if (r && r.ok) courses = await r.json().catch(() => null);
+  } catch (e) { console.log('[EP] notif: error de red en getAllCourses:', e && e.message); }
+  if (!Array.isArray(courses) || !courses.length) return null;
+  const now = Date.now();
+  const active = courses.filter(cw => {
+    const c = cw && cw.curso;
+    if (!c) return false;
+    if (c.archivado !== 0) return false;
+    const end = Date.parse(c.fechaTermino || '') || 0;
+    return end > now - 30 * 24 * 60 * 60 * 1000;
+  }).slice(0, 20);
+  const out = [];
+  for (const cw of active) {
+    try {
+      const r = await epnApi(tok, '/eminusapi/api/Actividad/getActividadesEstudiante/' + encodeURIComponent(cw.curso.idCurso), EP_EMINUS_BASE + '/eminus4/page/course/activity');
+      if (!r.ok) continue;
+      const txt = await r.text();
+      if (!txt.trim()) continue;
+      const arr = JSON.parse(txt);
+      if (Array.isArray(arr)) for (const a of arr) out.push({ ...a, courseId: cw.curso.idCurso, courseName: cw.curso.nombre, course: cw.curso.nombre, type: 'activity' });
+    } catch {}
+  }
+  return out;
+}
+
+// Pendiente = no entregado y deadline a futuro (vencidas no notifican)
+function epnPending(list) {
+  const now = Date.now();
+  return (list || []).filter(a => {
+    const submitted = !(!a.estadoEntrega || a.estadoEntrega === 0 || a.estadoEntrega === null) ;
+    if (submitted) return false;
+    const t = Date.parse(a.fechaEntrega || a.fechaTermino || '') || 0;
+    return t > now;
+  });
+}
+
+let _epnChecking = false;
+let _epnLastFreshAt = 0;   // última corrida con datos frescos (tab inyectado o fetch propio)
+const EPN_MAX_PER_RUN = 8; // tope anti-avalancha: máx notificaciones por corrida
+
+// Fingerprint barato de la lista de pendientes (id:due:estado ordenado). Lista idéntica
+// a la última procesada = nada nuevo que revisar → skip (recargas del widget cuestan ~cero).
+function epnFingerprint(list) {
+  try {
+    return (list || []).map(a =>
+      String(a.idActividad) + ':' + (Date.parse(a.fechaEntrega || a.fechaTermino || '') || 0) + ':' + (a.estadoEntrega || 0)
+    ).sort().join('|');
+  } catch { return ''; }
+}
+
+async function checkDueTasks(cause, injectedRaw) {
+  // Cooldown por STORAGE (60 s), no timers: el SW MV3 se duerme a ~30 s de idle y un
+  // setTimeout pendiente MUERE con él (el debounce trailing anterior nunca disparaba).
+  // El PRIMER trigger de pestaña corre AL INSTANTE; los siguientes dentro de 60 s se descartan.
+  if (cause === 'fresh-tab') {
+    console.log('[EP] notif: fresh-tab trigger recibido');
+    try {
+      const r = await chrome.storage.local.get(['ep_notif_last_fresh_v1']);
+      const last = (r && r.ep_notif_last_fresh_v1) || 0;
+      if (Date.now() - last < 60000) { console.log('[EP] notif: fresh-tab en cooldown, descartado'); return; }
+      await chrome.storage.local.set({ ep_notif_last_fresh_v1: Date.now() });
+    } catch {}
+    console.log('[EP] notif: fresh-tab trigger → check inmediato');
+    return checkDueTasks('fresh-tab-run', injectedRaw);
+  }
+  if (_epnChecking) return;
+  _epnChecking = true;
+  try {
+    const s = await epnReadSettings();
+    const bellMap = s.tasks || {};
+    const bellCount = Object.keys(bellMap).length;
+    if (!s.newTasks && !bellCount) return;
+    let raw = Array.isArray(injectedRaw) && injectedRaw.length ? injectedRaw : null;
+    let rawIsFresh = !!raw;
+    if (!raw) {
+      // Ahorro: si la pestaña trajo datos frescos hace <5 min, el alarm se salta su fetch
+      // (los umbrales de campana no cruzan nada nuevo con datos de <5 min).
+      if (cause === 'alarm' && (Date.now() - _epnLastFreshAt) < 5 * 60 * 1000) return;
+      raw = await epnFetchPendingActivities();
+      rawIsFresh = !!raw;
+      if (!raw) {
+        // Fallback: snapshot cacheado por el content script (las fechas siguen sirviendo)
+        try {
+          const c = await chrome.storage.local.get(['ep_acts_cache_v1']);
+          const cc = c && c.ep_acts_cache_v1;
+          if (cc && Array.isArray(cc.items)) { raw = cc.items; rawIsFresh = false; }
+        } catch {}
+      }
+    }
+    if (!raw) { console.log('[EP] notif: sin datos (sesión no disponible ni snapshot) — check abortado'); return; }
+    const pending = epnPending(raw);
+    const now = Date.now();
+    if (rawIsFresh) _epnLastFreshAt = now;
+
+    // Skip por fingerprint SOLO en triggers de pestaña (su misión es detectar nuevas;
+    // el cruce de umbrales lo cubre el alarm cada 15 min, que nunca se salta por fp).
+    if (cause === 'fresh-tab-run') {
+      let lastFp = '';
+      try { const r = await chrome.storage.local.get(['ep_notif_last_fp_v1']); lastFp = (r && r.ep_notif_last_fp_v1) || ''; } catch {}
+      const fp = epnFingerprint(pending);
+      if (fp && fp === lastFp) return;
+      if (fp) { try { await chrome.storage.local.set({ ep_notif_last_fp_v1: fp }); } catch {} }
+    }
+
+    let fired = {};
+    try { const r = await chrome.storage.local.get(['ep_notif_fired_v1']); fired = (r && r.ep_notif_fired_v1) || {}; } catch {}
+    let seen = { ids: [], baselined: false };
+    try { const r = await chrome.storage.local.get(['ep_seen_tasks_v1']); if (r && r.ep_seen_tasks_v1) seen = r.ep_seen_tasks_v1; } catch {}
+    const seenSet = new Set((seen.ids || []).map(String));
+    let seenScreen = [];
+    try { const r = await chrome.storage.local.get(['ep_seen_on_screen_v1']); const v = r && r.ep_seen_on_screen_v1; if (v && Array.isArray(v.ids)) seenScreen = v.ids; } catch {}
+    const screenSet = new Set(seenScreen.map(String));
+    let budget = EPN_MAX_PER_RUN;
+
+    // 1) Tareas nuevas: idActividad fuera del set visto y no ya vista en pantalla.
+    //    Primera corrida = baseline silencioso (no avalancha).
+    if (s.newTasks) {
+      const news = pending.filter(a => { const id = String(a.idActividad); return !seenSet.has(id) && !screenSet.has(id); });
+      if (!seen.baselined) {
+        seen.baselined = true;
+        console.log('[EP] notif: baseline de tareas (' + pending.length + '), sin notificar');
+      } else {
+        for (const a of news) {
+          if (budget <= 0) break; // el resto queda en el set visto (sin notificar, sin repetir)
+          const id = String(a.idActividad);
+          const due = Date.parse(a.fechaEntrega || a.fechaTermino || '') || 0;
+          const leftMs = due - now;
+          epnNotify('epn-new-' + (a.courseId || a.idCurso || 0) + '-' + id,
+            (a.titulo || 'Actividad'),
+            (a.courseName || a.course || 'Eminus') + ' · vence en ' + epnFmtLeft(Math.max(0, leftMs)),
+            { kind: 'new', courseId: (a.courseId || a.idCurso || 0), idActividad: a.idActividad, leftMs });
+          budget--;
+          // nace con <24 h: el umbral de 24 ya está cubierto por este aviso (sin doble notificación)
+          if (leftMs <= 24 * 3600 * 1000 && leftMs > 0) {
+            fired[id] = [...new Set([...(fired[id] || []), 24])];
+          }
+        }
+        if (news.length) console.log('[EP] notif: ' + Math.min(news.length, EPN_MAX_PER_RUN) + ' tarea(s) nueva(s)' + (news.length > EPN_MAX_PER_RUN ? ' (' + (news.length - EPN_MAX_PER_RUN) + ' sin avisar por tope)' : ''));
+      }
+    }
+    for (const a of pending) seenSet.add(String(a.idActividad));
+
+    // 2) Vence pronto (campana POR TARJETA): solo tareas marcadas con la campana;
+    //    el umbral más estricto cruzado dispara UN aviso. Opt-in explícito: ignora visto-en-pantalla.
+    if (bellCount) {
+      for (const a of pending) {
+        if (budget <= 0) break;
+        const id = String(a.idActividad);
+        if (!bellMap[id]) continue;
+        const due = Date.parse(a.fechaEntrega || a.fechaTermino || '') || 0;
+        const leftMs = due - now;
+        const done = new Set(fired[id] || []);
+        const crossed = s.thresholds.filter(h => leftMs <= h * 3600 * 1000 && !done.has(h)).sort((x, y) => x - y);
+        if (!crossed.length) continue;
+        epnNotify('epn-due-' + (a.courseId || a.idCurso || 0) + '-' + id + '-' + crossed[0],
+          (a.titulo || 'Actividad'),
+          (a.courseName || a.course || 'Eminus') + ' · vence en ' + epnFmtLeft(Math.max(0, leftMs)),
+          { kind: 'due', courseId: (a.courseId || a.idCurso || 0), idActividad: a.idActividad, leftMs });
+        budget--;
+        fired[id] = [...new Set([...(fired[id] || []), ...crossed])];
+      }
+      // Poda del mapa: tareas ya entregadas/vencidas dejan de necesitar campana (solo con datos frescos)
+      if (rawIsFresh) {
+        const liveIds = new Set(pending.map(a => String(a.idActividad)));
+        const pruned = {};
+        let changed = false;
+        for (const k of Object.keys(bellMap)) {
+          if (liveIds.has(k)) pruned[k] = true; else changed = true;
+        }
+        if (changed) { try { await chrome.storage.local.set({ ep_notif_tasks_v1: pruned }); } catch {} }
+      }
+    }
+
+    // Persistencia: set visto (cap 1000) + fired recortado a ids actuales
+    const keepFired = {};
+    for (const a of pending) { const id = String(a.idActividad); if (fired[id]) keepFired[id] = fired[id]; }
+    try {
+      await chrome.storage.local.set({
+        ep_seen_tasks_v1: { ids: [...seenSet].slice(-1000), baselined: true, ts: now },
+        ep_notif_fired_v1: keepFired
+      });
+    } catch {}
+  } catch (e) {
+    console.warn('[EP] notif: check error', e && e.message);
+  } finally { _epnChecking = false; }
+}
+
+function ensureEpNotifAlarm() {
+  return new Promise((resolve) => {
+    try {
+      chrome.alarms.get(EPN_ALARM, (a) => {
+        // 15 min: si no existe O el período difiere (upgrade desde 30), recrear —
+        // chrome.alarms.create con el mismo nombre reemplaza.
+        try {
+          if (a && a.scheduledTime && a.periodInMinutes === 15) { resolve(); return; }
+        } catch {}
+        try { chrome.alarms.create(EPN_ALARM, { periodInMinutes: 15, delayInMinutes: 2 }); } catch {}
+        resolve();
+      });
+    } catch { try { chrome.alarms.create(EPN_ALARM, { periodInMinutes: 15, delayInMinutes: 2 }); } catch {} resolve(); }
+  });
+}
+ensureEpNotifAlarm();
+
+chrome.alarms.onAlarm.addListener((al) => {
+  try {
+    if (al && al.name === EPN_ALARM) checkDueTasks('alarm');
+    // Reintento de arranque: al abrir Chrome la red/cookies pueden no estar listas y el
+    // check de startup falla en silencio — esta alarm (resistente al sleep del SW) repite.
+    else if (al && al.name === EPN_ALARM_STARTUP_RETRY) checkDueTasks('startup-retry');
+  } catch {}
+});
+chrome.runtime.onStartup.addListener(() => {
+  try {
+    console.log('[EP] notif: Chrome abrió → check de tareas nuevas');
+    ensureEpNotifAlarm();
+    checkDueTasks('startup').catch(() => {}).finally(() => {
+      try { chrome.alarms.create(EPN_ALARM_STARTUP_RETRY, { delayInMinutes: 1 }); } catch {}
+    });
+  } catch {}
+});
+chrome.runtime.onInstalled.addListener(() => { try { ensureEpNotifAlarm(); } catch {} });
+
+// Enrutamiento de clics (cuerpo y botón "Abrir tarea"):
+// - Con pestaña de Eminus viva → la enfoca y le manda epnOpenTask (la página ejecuta
+//   su propio navigateToActivity con localStorage + SPA).
+// - Sin pestaña → abre /activity/delivery con parámetros; el content script
+//   (document_start) los convierte en el mismo config de navegación.
+function epnOpenTaskTarget(courseId, activityId) {
+  const actUrl = EP_EMINUS_BASE + '/eminus4/page/course/activity/delivery?epnCourse=' +
+    encodeURIComponent(courseId) + '&epnAct=' + encodeURIComponent(activityId);
+  try {
+    chrome.tabs.query({ url: 'https://eminus.uv.mx/*' }, (tabs) => {
+      try {
+        if (tabs && tabs.length) {
+          const t = tabs[0];
+          chrome.tabs.update(t.id, { active: true });
+          if (t.windowId != null) { try { chrome.windows.update(t.windowId, { focused: true }); } catch {} }
+          try { chrome.tabs.sendMessage(t.id, { action: 'epnOpenTask', courseId: courseId, activityId: activityId }, () => { void chrome.runtime.lastError; }); } catch {}
+        } else chrome.tabs.create({ url: actUrl });
+      } catch { try { chrome.tabs.create({ url: actUrl }); } catch {} }
+    });
+  } catch { try { chrome.tabs.create({ url: actUrl }); } catch {} }
+}
+
+function epnOpenListTarget() {
+  try {
+    chrome.tabs.query({ url: 'https://eminus.uv.mx/*' }, (tabs) => {
+      try {
+        if (tabs && tabs.length) {
+          const t = tabs[0];
+          chrome.tabs.update(t.id, { active: true });
+          if (t.windowId != null) { try { chrome.windows.update(t.windowId, { focused: true }); } catch {} }
+        } else chrome.tabs.create({ url: EP_EMINUS_BASE + '/eminus4/page/course/list' });
+      } catch { try { chrome.tabs.create({ url: EP_EMINUS_BASE + '/eminus4/page/course/list' }); } catch {} }
+    });
+  } catch { try { chrome.tabs.create({ url: EP_EMINUS_BASE + '/eminus4/page/course/list' }); } catch {} }
+}
+
+try {
+  chrome.notifications.onClicked.addListener((nid) => {
+    try {
+      if (!String(nid || '').startsWith('epn-')) return;
+      const m = String(nid).match(/^epn-(?:new|due)-(\d+)-(\d+)/);
+      if (m && Number(m[1]) > 0) { epnOpenTaskTarget(m[1], m[2]); return; }
+      epnOpenListTarget(); // epn-test-* y formatos legados
+    } catch {}
+  });
+  chrome.notifications.onButtonClicked.addListener((nid, btnIdx) => {
+    try {
+      if (btnIdx !== 0) return;
+      const m = String(nid || '').match(/^epn-(?:new|due)-(\d+)-(\d+)/);
+      if (m && Number(m[1]) > 0) epnOpenTaskTarget(m[1], m[2]);
+    } catch {}
+  });
+} catch {}

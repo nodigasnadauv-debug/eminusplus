@@ -5,6 +5,272 @@ if(location.pathname.includes('/page/course/list')){
 var __ep_side_last = typeof __ep_side_last !== 'undefined' ? __ep_side_last : 0, __ep_arrow_last = typeof __ep_arrow_last !== 'undefined' ? __ep_arrow_last : 0, __ep_brand_last = typeof __ep_brand_last !== 'undefined' ? __ep_brand_last : 0, __ep_hideUV_last = typeof __ep_hideUV_last !== 'undefined' ? __ep_hideUV_last : 0, __ep_persistent_last = typeof __ep_persistent_last !== 'undefined' ? __ep_persistent_last : 0;
 // FIX SISTÉMICO: sync a window para evitar ReferenceError en lienzo + re-inyección SPA
 try{ window.__ep_side_last = window.__ep_side_last || __ep_side_last; window.__ep_arrow_last = window.__ep_arrow_last || __ep_arrow_last; window.__ep_brand_last = window.__ep_brand_last || __ep_brand_last; window.__ep_hideUV_last = window.__ep_hideUV_last || __ep_hideUV_last; window.__ep_persistent_last = window.__ep_persistent_last || __ep_persistent_last; }catch{}
+// Ocultar nombre/filtros: deciden ANTES del primer paint. localStorage es sincrónico
+// (decisión inmediata); chrome.storage solo completa si la pestaña arrancó sin ep_cfg
+// (tras logout/clear de Eminus). Document_start + Angular tarda segundos en pintar →
+// nada de esto llega a verse.
+(function __ep_hideNameEarly(){
+  let decided=false;
+  try{
+    const j=JSON.parse(localStorage.getItem('ep_cfg')||'null');
+    if(j){ decided=true; __ep_applyHideName(!!j.hideStudentName); __ep_applyHideFilters(!!j.hideFilters); __ep_applyFrostedBar(!!j.frostedBar); }
+  }catch{}
+  try{
+    chrome.storage.local.get(['ep_cfg']).then(r=>{
+      try{ const c=r&&r.ep_cfg; if(!decided && c){ __ep_applyHideName(!!c.hideStudentName); __ep_applyHideFilters(!!c.hideFilters); __ep_applyFrostedBar(!!c.frostedBar); } }catch{}
+    }).catch(()=>{});
+  }catch{}
+  __ep_fixCoursesHeight();
+})();
+// FIX alto: .container_courses (lista de cursos) cortaba las filas de tarjetas —
+// el contenedor crece con su contenido (height/max-height fuera, overflow visible)
+// y la página scrollea naturalmente; nada se recorta. Siempre activo.
+function __ep_fixCoursesHeight(){
+  try{
+    const CSS='.container_courses{height:auto !important; max-height:none !important; min-height:0 !important; overflow:visible !important;}';
+    let st=document.getElementById('ep-courses-height');
+    if(!st){ st=document.createElement('style'); st.id='ep-courses-height'; (document.head||document.documentElement).appendChild(st); }
+    if(st.textContent!==CSS) st.textContent=CSS;
+  }catch{}
+}
+// Fondo personalizado: imagen (PNG/JPG/WebP/GIF) o video (MP4/WebM) importado por el
+// usuario (data URL), pintado ANTES del primer frame. Misma cadena que ep_cfg:
+// chrome.storage es el durable (unlimitedStorage) y sessionStorage el espejo de lectura
+// síncrona → en recarga el fondo ya está al arrancar el script, sin esperar el get async
+// (cero flash). GIF animado y video van tal cual (re-encodar destruiría el movimiento);
+// si no caben en el espejo síncrono (~5MB), solo chrome.storage → aparecen al primer
+// get (todavía antes del render de Angular).
+function __ep_bgValid(u){
+  return typeof u === 'string' && /^data:(image\/(png|jpe?g|webp|gif)|video\/(mp4|webm));base64,/i.test(u);
+}
+function __ep_bgIsVideo(u){
+  return typeof u === 'string' && /^data:video\/(mp4|webm);base64,/i.test(u);
+}
+// Durable para fondos grandes (GIF/video): IndexedDB del origen de la página.
+// chrome.storage tiene límite de mensaje IPC (~64MB) y cuota de 10MB sin
+// unlimitedStorage — con data URLs de decenas de MB es frágil y su fallo es
+// silencioso. IndexedDB no tiene esos límites y sobrevive recargas y logout.
+function __ep_bgIdbOpen(){
+  return new Promise((res)=>{
+    try{
+      const rq = indexedDB.open('ep_bg_db', 1);
+      rq.onupgradeneeded = () => { try{ rq.result.createObjectStore('bg'); }catch{} };
+      rq.onsuccess = () => res(rq.result);
+      rq.onerror = () => { try{ console.error('[EP] bg: IndexedDB open error', rq.error); }catch{} res(null); };
+      rq.onblocked = () => res(null);
+    }catch(e){ try{ console.error('[EP] bg: IndexedDB no disponible', e); }catch{} res(null); }
+  });
+}
+function __ep_bgIdbSet(v){
+  return __ep_bgIdbOpen().then(db => new Promise((res)=>{
+    if(!db) return res(false);
+    try{
+      const tx = db.transaction('bg', 'readwrite');
+      tx.objectStore('bg').put(v, 'v1');
+      tx.oncomplete = () => { try{ db.close(); }catch{} res(true); };
+      tx.onerror = () => { try{ console.error('[EP] bg: IndexedDB put error', tx.error); }catch{} try{ db.close(); }catch{} res(false); };
+      tx.onabort = () => { try{ db.close(); }catch{} res(false); };
+    }catch(e){ try{ console.error('[EP] bg: IndexedDB put throw', e); }catch{} try{ db.close(); }catch{} res(false); }
+  }));
+}
+function __ep_bgIdbGet(){
+  return __ep_bgIdbOpen().then(db => new Promise((res)=>{
+    if(!db) return res(null);
+    try{
+      const tx = db.transaction('bg', 'readonly');
+      const rq = tx.objectStore('bg').get('v1');
+      rq.onsuccess = () => { try{ db.close(); }catch{} res(rq.result || null); };
+      rq.onerror = () => { try{ console.error('[EP] bg: IndexedDB get error', rq.error); }catch{} try{ db.close(); }catch{} res(null); };
+    }catch(e){ try{ console.error('[EP] bg: IndexedDB get throw', e); }catch{} try{ db.close(); }catch{} res(null); }
+  }));
+}
+function __ep_bgIdbDel(){
+  return __ep_bgIdbOpen().then(db => new Promise((res)=>{
+    if(!db) return res(false);
+    try{
+      const tx = db.transaction('bg', 'readwrite');
+      tx.objectStore('bg').delete('v1');
+      tx.oncomplete = () => { try{ db.close(); }catch{} res(true); };
+      tx.onerror = () => { try{ db.close(); }catch{} res(false); };
+    }catch{ try{ db.close(); }catch{} res(false); }
+  }));
+}
+function __ep_applyPageBg(u){
+  try{
+    let s = document.getElementById('ep-page-bg-style');
+    if(!__ep_bgValid(u)){
+      try{ window.__ep_bgCache = null; }catch{}
+      try{ document.documentElement.classList.remove('ep-has-bg'); }catch{}
+      try{ document.body && document.body.classList.remove('ep-has-bg'); }catch{}
+      if(s) s.remove();
+      try{ const v = document.getElementById('ep-bg-video'); if(v) v.remove(); }catch{}
+      return;
+    }
+    try{ document.documentElement.classList.add('ep-has-bg'); }catch{}
+    try{ document.body && document.body.classList.add('ep-has-bg'); }catch{}
+    try{ window.__ep_bgCache = u; }catch{}
+    if(!s){
+      s = document.createElement('style');
+      s.id = 'ep-page-bg-style';
+      (document.head || document.documentElement).appendChild(s);
+    }
+    if(__ep_bgIsVideo(u)){
+      // Video: elemento fijo a pantalla completa DETRÁS del contenido; el body queda
+      // transparente para que se vea (el sólido dark/claro lo taparía).
+      try{ const v0 = document.getElementById('ep-bg-video'); if(v0) v0.remove(); }catch{}
+      s.textContent = '';
+      try{
+        const vs = document.getElementById('ep-bg-video-style') || (()=>{ const st=document.createElement('style'); st.id='ep-bg-video-style'; (document.head || document.documentElement).appendChild(st); return st; })();
+        vs.textContent = 'html,body{background:transparent!important;background-image:none!important}';
+      }catch{}
+      const v = document.createElement('video');
+      v.id = 'ep-bg-video';
+      v.src = u;
+      v.muted = true;
+      v.loop = true;
+      v.autoplay = true;
+      v.setAttribute('playsinline', '');
+      v.style.cssText = 'position:fixed; top:0; left:0; width:100vw; height:100vh; object-fit:cover; z-index:-1; pointer-events:none; background:#0b1220;';
+      try{ (document.body || document.documentElement).appendChild(v); }catch{}
+      try{ const p = v.play(); if(p && p.catch) p.catch(()=>{}); }catch{}
+    } else {
+      try{ const v0 = document.getElementById('ep-bg-video'); if(v0) v0.remove(); }catch{}
+      try{ const vs = document.getElementById('ep-bg-video-style'); if(vs) vs.remove(); }catch{}
+      s.textContent = 'body{background-image:url("' + u + '")!important;background-size:cover!important;background-position:center!important;background-repeat:no-repeat!important;background-attachment:fixed!important}';
+    }
+  }catch{}
+}
+function __ep_bgPaintThumb(){
+  try{
+    const t = document.getElementById('ep-bg-thumb');
+    if(!t) return;
+    const c = window.__ep_bgCache;
+    if(__ep_bgIsVideo(c)){ t.style.backgroundImage = 'none'; t.style.borderStyle = 'solid'; t.textContent = '▶'; t.style.color = '#f8fafc'; t.style.display = 'inline-flex'; t.style.alignItems = 'center'; t.style.justifyContent = 'center'; t.style.background = '#0f172a'; }
+    else if(__ep_bgValid(c)){ t.style.background = ''; t.style.backgroundImage = 'url("' + c + '")'; t.style.borderStyle = 'solid'; t.textContent = ''; t.style.color = ''; }
+    else { t.style.background = ''; t.style.backgroundImage = 'none'; t.style.borderStyle = 'dashed'; t.textContent = ''; t.style.color = ''; }
+  }catch{}
+}
+function __ep_bgSave(u){
+  try{
+    if(__ep_bgValid(u)){
+      try{ window.__ep_bgCache = u; }catch{}
+      // durable SIEMPRE en IndexedDB (sin límites de mensaje/cuota); chrome.storage
+      // queda como respaldo heredado para valores pequeños
+      try{
+        __ep_bgIdbSet(u).then(ok => { try{ console.log('[EP] bg: IndexedDB guardado ' + (ok ? 'ok' : 'FALLÓ') + ' (' + Math.round(u.length / 1024) + 'KB)'); }catch{} });
+      }catch(e){ try{ console.error('[EP] bg: idb set throw', e); }catch{} }
+      try{
+        if(u.length <= 8 * 1024 * 1024){
+          const _p = chrome.storage.local.set({ ep_bg_v1: u });
+          if(_p && _p.catch) _p.catch(e=>{ try{ console.warn('[EP] bg: chrome.storage (respaldo) rechazó', e); }catch{} });
+        }
+      }catch(e){ try{ console.warn('[EP] bg: chrome.storage (respaldo) throw', e); }catch{} }
+      // espejo síncrono solo si cabe (~5MB de sessionStorage); video/grande va por IndexedDB
+      if(u.length <= 4 * 1024 * 1024){ try{ sessionStorage.setItem('ep_bg_v1', u); }catch{} }
+      __ep_applyPageBg(u);
+    } else {
+      try{ window.__ep_bgCache = null; }catch{}
+      try{ chrome.storage.local.remove('ep_bg_v1').catch(()=>{}); }catch{}
+      try{ sessionStorage.removeItem('ep_bg_v1'); }catch{}
+      try{ __ep_bgIdbDel().then(ok => { try{ console.log('[EP] bg: IndexedDB limpiado ' + (ok ? 'ok' : 'FALLÓ')); }catch{} }); }catch{}
+      __ep_applyPageBg(null);
+    }
+  }catch{}
+  try{ __ep_bgPaintThumb(); }catch{}
+}
+(function __ep_bgEarly(){
+  if(window.top !== window) return;
+  // 1) espejo síncrono: paint instantáneo (solo items pequeños)
+  try{
+    const u = sessionStorage.getItem('ep_bg_v1');
+    if(__ep_bgValid(u)) __ep_applyPageBg(u);
+  }catch{}
+  // 2) chrome.storage (rápido, heredado) — si trae algo válido pinta YA
+  try{
+    chrome.storage.local.get(['ep_bg_v1']).then(r=>{
+      try{
+        const m = r && r.ep_bg_v1;
+        if(__ep_bgValid(m)){
+          if(m !== (window.__ep_bgCache || null)) __ep_applyPageBg(m);
+          if(m.length <= 4 * 1024 * 1024){ try{ sessionStorage.setItem('ep_bg_v1', m); }catch{} }
+          try{ console.log('[EP] bg restaurado desde chrome.storage (' + (__ep_bgIsVideo(m) ? 'video ' : '') + Math.round(m.length / 1024) + 'KB)'); }catch{}
+          return;
+        }
+        // 3) durable IndexedDB — la fuente de verdad para GIF/video grandes
+        __ep_bgIdbGet().then(m2=>{
+          try{
+            if(__ep_bgValid(m2)){
+              if(m2 !== (window.__ep_bgCache || null)) __ep_applyPageBg(m2);
+              if(m2.length <= 4 * 1024 * 1024){ try{ sessionStorage.setItem('ep_bg_v1', m2); }catch{} }
+              try{ console.log('[EP] bg restaurado desde IndexedDB (' + (__ep_bgIsVideo(m2) ? 'video ' : '') + Math.round(m2.length / 1024) + 'KB)'); }catch{}
+            } else if(m2){
+              try{ console.warn('[EP] bg: valor en IndexedDB inválido, limpiando'); }catch{}
+              __ep_bgIdbDel();
+            } else {
+              try{ console.log('[EP] bg: sin fondo almacenado'); }catch{}
+            }
+          }catch(e){ try{ console.error('[EP] bg: error restaurando (idb)', e); }catch{} }
+        });
+      }catch(e){ try{ console.error('[EP] bg: error restaurando', e); }catch{} }
+    }).catch(e=>{ try{ console.error('[EP] bg: error leyendo chrome.storage', e); }catch{} });
+  }catch{}
+})();
+// Importación: valida imagen/video. Imágenes estáticas grandes se reencodifican a
+// ≤2560px para conservar el arranque instantáneo; GIF animado y video van TAL CUAL
+// (canvas perdería el movimiento) — si exceden el espejo síncrono, solo chrome.storage.
+function __ep_bgImport(file){
+  try{
+    if(!file) return;
+    const _t = String(file.type || '');
+    if(!/^image\//.test(_t) && !/^video\//.test(_t)) return;
+    const MAX = 4 * 1024 * 1024;
+    const MAX_VIDEO = 30 * 1024 * 1024;
+    try{ console.log('[EP] bg: importando ' + _t + ' (' + Math.round((file.size || 0) / 1024) + 'KB)'); }catch{}
+    const fr = new FileReader();
+    fr.onerror = () => { try{ console.error('[EP] bg: FileReader error', fr.error); }catch{} };
+    fr.onload = () => {
+      try{
+        const u = String(fr.result || '');
+        if(!__ep_bgValid(u)) return;
+        if(/^video\//.test(_t)){
+          if(u.length > MAX_VIDEO){ try{ console.warn('[EP] bg: video demasiado grande (' + Math.round(u.length / 1024 / 1024) + 'MB, máx ~30MB)'); }catch{} return; }
+          __ep_bgSave(u);
+          return;
+        }
+        if(u.length <= MAX){ __ep_bgSave(u); return; }
+        // GIF animado: no re-encodar (canvas fija el primer frame y mata el movimiento)
+        if(/gif/i.test(_t) || /image\/gif/i.test(u.slice(5, 25))){
+          try{ console.log('[EP] bg: gif grande (' + Math.round(u.length / 1024) + 'KB) → solo chrome.storage'); }catch{}
+          __ep_bgSave(u);
+          return;
+        }
+        const img = new Image();
+        img.onload = () => {
+          try{
+            const k = Math.min(1, 2560 / Math.max(img.width || 1, img.height || 1));
+            const c = document.createElement('canvas');
+            c.width = Math.max(1, Math.round((img.width || 1) * k));
+            c.height = Math.max(1, Math.round((img.height || 1) * k));
+            const ctx = c.getContext('2d');
+            if(!ctx){ __ep_bgSave(u); return; }
+            if(!/png/i.test(_t)){ ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, c.width, c.height); }
+            ctx.drawImage(img, 0, 0, c.width, c.height);
+            let u2 = c.toDataURL(/png/i.test(_t) ? 'image/png' : 'image/jpeg', 0.9);
+            if(u2.length > MAX && !/jpeg/i.test(u2.slice(5, 15))){
+              ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, c.width, c.height);
+              ctx.drawImage(img, 0, 0, c.width, c.height);
+              u2 = c.toDataURL('image/jpeg', 0.9);
+            }
+            __ep_bgSave(__ep_bgValid(u2) ? u2 : u);
+          }catch{ try{ __ep_bgSave(u); }catch{} }
+        };
+        img.onerror = () => { try{ __ep_bgSave(u); }catch{} };
+        img.src = u;
+      }catch{}
+    };
+    fr.readAsDataURL(file);
+  }catch{}
+}
 // Anti-rebote de sesion: a veces el sitio limpia localStorage justo despues del
 // login (sus propias peticiones al dashboard llegan 401 y su interceptor recarga
 // la pagina de login), obligando a teclear la contraseña otra vez. Al aparecer el
@@ -110,7 +376,7 @@ const API_ENDPOINTS = {
 // Base URL
 const BASE_URL = "https://eminus.uv.mx";
 console.log('[EP] Eminus Plus v2.1.7 — activo');
-console.log('[EP] build 3.12.38-instant (cache-por-usuario)');
+console.log('[EP] build 3.13.0-fondo (bg-idb + yt-search)');
 try { window.__ep_t0 = performance.now(); } catch {}
 // Log de timing [EP-T]: ms desde que el content script arranca (diagnóstico en consola F12)
 function __ep_log(){ try{ const t = Math.round(performance.now() - (window.__ep_t0 || performance.now())); console.log.apply(console, ['[EP-T +' + t + 'ms]'].concat([].slice.call(arguments))); }catch{} }
@@ -134,7 +400,7 @@ function __ep_perfShow(){
     let el = dues.querySelector('#ep-perf');
     if(!el){ el = document.createElement('div'); el.id = 'ep-perf'; dues.appendChild(el); }
     el.textContent = 'shell ' + f(p.shell) + ' · datos ' + f(p.data) + ' · fac ' + f(p.fac) + ' · red ' + fR(p.fetch0, p.fetch1);
-    el.style.cssText = 'font-size:10px;color:#94a3b8;text-align:center;padding:3px 6px;';
+    el.style.cssText = 'font-size:10px;color:var(--ep-meta-tx,#64748b);text-align:center;padding:3px 6px;';
   }catch{}
 }
 // F5 medición: marcas de tiempo solo con localStorage.ep_perf=1 (cero costo en normal).
@@ -268,7 +534,16 @@ window.__ep_config_open_until = 0;
 function __ep_isConfigOpening(){ return Date.now() < (window.__ep_config_open_until || 0); }
 window.__ep_user_action_until = 0;
 function __ep_isUserAction(){ return Date.now() < (window.__ep_user_action_until || 0); }
-function __ep_markUserAction(){ window.__ep_user_action_until = Date.now() + 800; }
+function __ep_markUserAction(){ window.__ep_user_action_until = Date.now() + 800; window.__ep_config_open_until = 0; }
+// FIX doble-toggle: guard compartido por boton — pointerdown/click/keydown-sintetizado
+// solo pueden alternar una vez cada 200ms (Enter enfocado dispara keydown + click sintetico,
+// y el doble-tap rapido disparaba dos toggles -> abria y cerraba al instante).
+function __ep_toggleGuard(btn){
+  const now = Date.now();
+  if (btn.__ep_lastToggle && now - btn.__ep_lastToggle < 200) return false;
+  btn.__ep_lastToggle = now;
+  return true;
+}
 // ===== EP CONFIG SYSTEM — colores, modo oscuro, acento, lado =====
 function getThemeDefaultHex(){
   try{
@@ -533,7 +808,7 @@ function getBrandDefaultHex(){
     return null;
   }catch{ return null; }
 }
-const EP_DEFAULT_CONFIG = { dark:false, accent:'#06b6d4', side:'right', hideUVBranding:false, showFacilitator:true, urgency:{ urgent:'#dc2626', warning:'#f59e0b', safe:'#0ea5e9', intensity:{ urgent:'normal', warning:'normal', safe:'normal' } } };
+const EP_DEFAULT_CONFIG = { dark:false, accent:'#06b6d4', side:'right', viewMode:'default', hideUVBranding:false, hideStudentName:false, hideFilters:false, cardCompact:false, frostedBar:false, seasonalLogo:true, showFacilitator:true, mailWidget:true, notifBell:false, notifNew:true, notifThresholds:[24,6,1], urgency:{ urgent:'#dc2626', warning:'#f59e0b', safe:'#0ea5e9', intensity:{ urgent:'normal', warning:'normal', safe:'normal' } } };
 const EP_URGENCY_LEVELS = ['urgent', 'warning', 'safe'];
 const EP_URGENCY_META = {
   urgent: { name:'Urgente', desc:'Vencido · hoy · foros nuevos' },
@@ -547,6 +822,11 @@ const EP_URGENCY_INTENSITIES = {
 };
 const EP_ACCENT_PRESETS = ['#06b6d4','#eab308','#f59e0b','#ea580c','#ef4444','#e11d48','#ec4899','#334155'];
 const EP_PATCH_NOTES = [
+  { v:'3.13.3', date:'2026-11-17', title:'GIF de aniversario UV fiel + estabilidad al navegar', changes:['GIF de aniversario UV rediseñado con los componentes reales de la identidad UV: escudo de 4 cuarteles (pirámide de El Tajín, libro LEX, serpiente y cáliz, lira y paleta), flor de lis, antorcha con llama azul, ramas de laurel y lema — en los colores oficiales de la UV (azul #18529D y verde #28AD56)','Logo por temporada ya no se aplica en el título del login ni en la imagen de ayuda: solo cambia el logo del encabezado donde debe','Fix modo oscuro al iniciar sesión: el widget de tareas ya no aparece con fondo translúcido — ahora nace con su fondo negro correcto desde el primer segundo','Fix: al volver de un curso el widget ya no repite su animación de apertura sin fin (re-render con huella de datos y tope a los reintentos de actualización)','Fix: el widget ya no se re-abre solo cada que Angular refresca la página (guardia anti re-animación)','Fix: al regresar a la lista de cursos el panel lateral ya no se destruye y recomponer — vuelve al instante con sus datos y scroll intactos','Tarjeta compacta: el título del curso y los botones se acomodan al instante al entrar a la lista (antes saltaban a su sitio casi un segundo después)'] },
+  { v:'3.13.2', date:'2026-11-16', title:'Logo por temporada + modo oscuro pulido', changes:['Nuevo: logo por temporada — el logo del login cambia al GIF de la festividad activa con toggle en Configuración → Tema (activado por defecto)','Festividades incluidas: Reyes Magos (4-8 ene), Amor y Amistad (12-15 feb), Bandera (23-25 feb), Fiestas Patrias (13-17 sep), Día de Muertos (31 oct-2 nov), Revolución Mexicana (del 3er lunes de noviembre — fecha oficial movible — al viernes), Posadas (16-23 dic), Navidad (24-26 dic) y Año Nuevo (30 dic-3 ene, con GIF propio por año: 2028 y 2029)','GIF de Revolución nuevo: "20 NOV" dorado con cohetes, locomotora revolucionaria, sombrero de Zapata y listón tricolor','Instantáneo: el logo de temporada y la tarjeta del facilitador ya no esperan a que el DOM se aquiete — aparecen en cuanto existen (antes podían tardar varios segundos)','Facilitador: fix del facilitador fantasma que corrompía la tarjeta compacta al desactivar y reactivar la opción','Modo oscuro: los correos no leídos ya no llevan degradados blancos, y los títulos y textos oscuros (tareas, correo, MiUV, IA y estados vacíos) ahora son legibles','Modo oscuro: el contador de tareas y el botón Ver actividad ya no salen con letras negras si usas un acento claro','Fix: el engranaje de Configuración ya no se pinta de gris al pasar el cursor en modo claro','Autoreparación: si al recargar tu widget activo no aparece, se reabre solo en segundos','Campana por tarjeta con pulido visual: halo de tu acento y rebote al activar'] },
+  { v:'3.13.1', date:'2026-11-16', title:'Notificaciones premium + controles de interfaz', changes:['Notificaciones rediseñadas: título truncado a una línea, mensaje por categoría (tarea nueva o recordatorio) y botón "Abrir tarea" que abre la actividad directamente en Eminus','Prioridad alta si falta menos de 6 h para la entrega','Nuevo en Configuración → Tema: Ocultar nombre, Ocultar filtros, Tarjeta compacta y Barra difuminada — todo desactivado por defecto y se aplica al instante, sin parpadeo al cargar','Tarjeta compacta: tarjeta más baja y uniforme — insignias, estrella y accesos en una sola fila; nombre a 2 líneas con tu color de acento','Barra difuminada: barra superior translúcida con efecto vidrio que sigue tu color de acento; variante profunda en modo oscuro','IA más rápida: los resúmenes se precargan al renderizar el widget y al expandir ya están listos; respaldo automático entre servidores en 3.5 s','Fix: cerrar Configuración con la X ya no deja un hueco vacío en el widget'] },
+  { v:'3.13.0', date:'2026-11-16', title:'Fondo personalizado con videos y búsqueda de wallpapers', changes:['Nuevo: fondo personalizado en Configuración → Apariencia — tu propia imagen (PNG/JPG/WebP) o video (MP4/WebM) como fondo de Eminus','Los GIF animados y videos se reproducen de fondo, sin re-encodeo (se guardan tal cual)','Búsqueda de wallpapers 4K integrada: escribe tu término (p. ej. Minecraft) y abre resultados de YouTube ya filtrados a 4K','Botón de descarga: abre el convertidor en una pestaña para bajar el video e importarlo','Fix: los fondos grandes ya no se pierden al recargar (ahora se almacenan en IndexedDB, sin límite de tamaño de Chrome)','Modo oscuro: el fondo personalizado ya no lo borra el tema y la fila de fondo queda legible y alineada'] },
+  { v:'3.12.39', date:'2026-11-16', title:'Notificaciones por tarea + fix de pestañas', changes:['Nuevo: campana en la esquina de cada tarjeta del widget de tareas — activa avisos solo de esa tarea','Notificaciones del sistema: revisa cada 30 min y al abrir Chrome; tocar la notificación abre Eminus','Nueva pestaña Notificaciones en Configuración: avisos de tareas nuevas, umbrales editables (24/12/6/1 h) y botón de prueba','Fix: al cambiar rápido de pestaña (Foros → Tareas) el contenido de una ya no se pinta en la otra','Modo oscuro: badge de días y píldoras Leído/No leído con mejor contraste','Fix: lo que ya viste en el widget no se notifica como tarea nueva'] },
   { v:'3.12.37', date:'2026-10-16', title:'Nativo por defecto + IA bajo demanda', changes:['Login 100% nativo: la extensión ya no impone morado ni cyan al botón Iniciar sesión','Eminus intacto sin configurar: botones verdes, Modo lista y búsqueda solo se tiñen con tu color de Configuración','Widgets solo abren en la lista; delivery y demás vistas quedan cerradas, y volver es instantáneo sin recargar datos','IA bajo demanda: el resumen solo se genera al expandir el asistente — cero llamadas al cargar, menos cuota','Fix adjuntos de correo: descarga por endpoint real con autenticación (adiós 404)','Avatares con tu color configurado y contraste automático'] },
   { v:'3.12.0', date:'2026-10-16', title:'IA remota + urgencia configurable', changes:['Asistente y resúmenes 100% con IA remota (Gemini): respuestas completas, sin cortes ni textos locales','Nueva sección Colores de urgencia en Apariencia: color propio por nivel (Urgente, Próximo, Con tiempo)','Intensidad por nivel (Suave, Normal, Intenso): glow escalado; Intenso tiñe la tarjeta, Suave queda limpio sin línea','Textos blancos en botones Ver actividad, píldoras y etiquetas, en modo claro y oscuro','Botones verdes de Eminus y barra de progreso con tu color de acento','Mini-resumen y píldoras rediseñados; modo oscuro corregido en tarjetas y configuración'] },
   { v:'3.9.32', date:'2026-09-03', title:'Centro de configuración', changes:['Nuevo botón Configuración en MiUV (reemplaza contador)','Modo oscuro profesional','Selector de acento con presets + color personalizado','Posición izquierda/derecha para widgets','Buzón de sugerencias seguro a Discord (sin exponer webhook)','Notas de parche integradas'] },
@@ -594,6 +874,279 @@ function saveEpConfig(cfg){
   try{ sessionStorage.setItem('ep_cfg', JSON.stringify(cfg)); }catch{}
   try{ chrome.storage.local.set({ ep_cfg: cfg }).catch(()=>{}); }catch{}
 }
+// Ocultar nombre del encabezado (span h5 de la topbar). CSS puro: vale para el elemento
+// cuando sea que aparezca, sin MutationObserver. Default OFF.
+function __ep_applyHideName(on){
+  try{
+    const SEL='span.h5.m-0.px-3.py-1.g-color-white.g-font-size-14.g-font-weight-100.m--hidden-mobile';
+    // Con el nombre oculto, el avatar queda pegado al engranaje: le devolvemos el aire
+    // que dejaba el span (px-3 + separación) con un margen izquierdo propio.
+    const CSS=SEL+'{display:none !important; visibility:hidden !important;}'
+      +' img[aria-haspopup="true"].g-width-25.g-height-25.g-pointer{margin-left:16px !important;}';
+    let st=document.getElementById('ep-hide-name');
+    if(on){
+      if(!st){ st=document.createElement('style'); st.id='ep-hide-name'; (document.head||document.documentElement).appendChild(st); }
+      if(st.textContent!==CSS) st.textContent=CSS;
+    } else if(st) st.remove();
+  }catch{}
+}
+// Ocultar filtros (lista de cursos): header "Otros", contador "Mostrando N cursos" +
+// botón de modo, barra de búsqueda y formulario Mostrar/Ordenar/Perfil. CSS puro,
+// solo clases/atributos propios de esa página. Default OFF.
+function __ep_applyHideFilters(on){
+  try{
+    const CSS=[
+      'span[role="info"][aria-label^="Mostrando otros cursos"]{display:none !important; visibility:hidden !important;}',
+      'div.row.mt-3:has(span[role="info"][aria-label^="Mostrando "]){display:none !important;}',
+      'div.row.w-100.mt-3:has(> div button.mat-stroked-button-green-inline){display:none !important;}',
+      'div.row.w-100.SEARCH_BAR_BOX{display:none !important;}',
+      'form.row.w-100.FILTER_BOX{display:none !important;}'
+    ].join('\n');
+    let st=document.getElementById('ep-hide-filters');
+    if(on){
+      if(!st){ st=document.createElement('style'); st.id='ep-hide-filters'; (document.head||document.documentElement).appendChild(st); }
+      if(st.textContent!==CSS) st.textContent=CSS;
+    } else if(st) st.remove();
+  }catch{}
+}
+// Tarjeta compacta (lista de cursos): sin imagen de portada ni círculo-icono.
+// Insignias a la izquierda del footer; estrella + carpeta a la derecha (X X X X —— X X).
+// El nombre del curso toma el lugar que dejaba la estrella. CSS oculta al instante;
+// los movimientos de nodos los hace un observer (misma técnica que facilitador),
+// con registro de posición original para restaurar al desactivar. Default OFF.
+const __ep_compactMoves=[]; // {node,parent,next} para deshacer
+const __ep_compactInline=[]; // {node,prev} estilos inline impuestos (carpeta) para deshacer
+function __ep_compactCardsRun(){
+  try{ if(!loadEpConfig().cardCompact) return; }catch{ return; }
+  try{
+    document.querySelectorAll('mat-card.CourseCard, .CourseCard').forEach(card=>{
+      if(card.dataset.epCompactDone) return;
+      const footer=card.querySelector('.CardFooter');
+      if(!footer) return;
+      const badges=card.querySelector('[role="info"][aria-label^="Presiona tab para ver las insignias"]');
+      const star=card.querySelector('.hiddebutton');
+      const name=card.querySelector('b[role="article"][aria-label^="Nombre del curso"]');
+      card.dataset.epCompactDone='1';
+      // Separación vertical inline !important: la capa que SIEMPRE gana (el margen de
+      // mb-5 del sitio se pierde dentro del grid/fila). El undo la restaura.
+      try{
+        __ep_compactInline.push({node:card,prev:{'margin-bottom':card.style.getPropertyValue('margin-bottom'),'margin-top':card.style.getPropertyValue('margin-top')}});
+        card.style.setProperty('margin-bottom','16px','important');
+        card.style.setProperty('margin-top','16px','important');
+      }catch{}
+      // Carpeta a 20px por inline !important: el tema del sitio mete !important propio
+      // sobre fa-2xl y gana a cualquier hoja; el inline es la única capa que siempre gana.
+      const folder=footer.querySelector('i.fa-folder');
+      if(folder){
+        try{
+          const props=['font-size','line-height','vertical-align','display','align-items'];
+          const prev={}; for(const p of props) prev[p]=folder.style.getPropertyValue(p);
+          __ep_compactInline.push({node:folder,prev});
+          folder.style.setProperty('font-size','20px','important');
+          folder.style.setProperty('line-height','1','important');
+          folder.style.setProperty('vertical-align','middle','important');
+          folder.style.setProperty('display','inline-flex','important');
+          folder.style.setProperty('align-items','center','important');
+        }catch{}
+      }
+      if(star && star.parentNode && !footer.contains(star)){
+        star.__epPrevParent=star.parentNode; star.__epPrevNext=star.nextSibling;
+        __ep_compactMoves.push({node:star,parent:star.parentNode,next:star.nextSibling});
+        if(folder) footer.insertBefore(star,folder); else footer.appendChild(star);
+      }
+      if(badges && badges.parentNode && !footer.contains(badges)){
+        __ep_compactMoves.push({node:badges,parent:badges.parentNode,next:badges.nextSibling});
+        footer.insertBefore(badges,footer.firstChild);
+      }
+      if(name && star && star.__epPrevParent){
+        // el nombre ocupa el lugar original de la estrella (guardado antes de moverla)
+        try{
+          const p=star.__epPrevParent, nx=star.__epPrevNext;
+          if(p && p.isConnected){ __ep_compactMoves.push({node:name,parent:p,next:nx}); p.insertBefore(name,nx); }
+        }catch{}
+      }
+    });
+  }catch{}
+}
+function __ep_compactCardsUndo(){
+  try{
+    for(let i=__ep_compactMoves.length-1;i>=0;i--){
+      const m=__ep_compactMoves[i];
+      try{ if(m.parent && m.parent.isConnected) m.parent.insertBefore(m.node,m.next); }catch{}
+    }
+    __ep_compactMoves.length=0;
+  }catch{}
+  try{
+    for(const rec of __ep_compactInline){
+      try{
+        for(const p of Object.keys(rec.prev)){
+          if(rec.prev[p]) rec.node.style.setProperty(p,rec.prev[p]);
+          else rec.node.style.removeProperty(p);
+        }
+      }catch{}
+    }
+    __ep_compactInline.length=0;
+  }catch{}
+  try{ document.querySelectorAll('[data-ep-compact-done]').forEach(c=>{ delete c.dataset.epCompactDone; }); }catch{}
+}
+// FIX compose-late: el observer aplicaba los movimientos con throttle 800ms — al volver
+// a la lista la tarjeta compacta "se componía" tarde (el título saltaba a su sitio un
+// rato después de pintarse). Ráfaga corta de composición al entrar a la lista: runs
+// inmediato + 4 repasos para tarjetas que Angular pinta en cascada. Con guardia anti
+// ráfagas encimadas y early-return si la feature está apagada.
+function __ep_compactComposeBurst(){
+  try{ if(!loadEpConfig().cardCompact) return; }catch{ return; }
+  try{
+    const _now = Date.now();
+    if(_now - (window.__ep_compact_burst_last || 0) < 1500) return;
+    window.__ep_compact_burst_last = _now;
+  }catch{}
+  try{ __ep_compactCardsRun(); }catch{}
+  [120,300,600,1000].forEach(d=>{ try{ setTimeout(()=>{ try{ __ep_compactCardsRun(); }catch{} }, d); }catch{} });
+}
+function __ep_applyCardCompact(on){
+  try{
+    const CSS=[
+      'mat-card.CourseCard .CardHeader, .CourseCard .CardHeader{display:none !important;}',
+      '.CourseCard .CardBodyCircle{display:none !important;}',
+      '.CourseCard span[role="info"][aria-label^="Este Curso tiene un periodo"]{display:none !important;}',
+      '.CourseCard b:not([role="article"]){display:none !important;}',
+      '.CourseCard span[role="info"][aria-label^="El programa educativo"]{display:none !important;}',
+      'mat-card.CourseCard, .CourseCard{display:flex; flex-direction:column;}',
+      '.CourseCard .CardBody{flex:1 1 auto !important; display:flex; flex-direction:column;}',
+      '.CourseCard .CardFooter{margin-top:auto !important;}',
+      'html:not(.ep-dark) .CourseCard b[role="article"][aria-label^="Nombre del curso"]{color:#0f172a !important;}',
+      'html.ep-dark .CourseCard b[role="article"][aria-label^="Nombre del curso"]{color:#ffffff !important;}',
+      '.CourseCard b[role="article"][aria-label^="Nombre del curso"]{display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden;}',
+      '.CourseCard.CourseCard.CourseCard{margin-top:16px !important; margin-bottom:16px !important;}',
+      '.CourseCard .CardBody{padding:10px 12px !important; gap:0;}',
+      '.CourseCard .CardBody > div.mt-2{margin-top:2px !important;}',
+      '.CourseCard .CardBody .ep-prof{margin-top:6px !important;}',
+      '.CourseCard .CardFooter{display:flex !important; align-items:center !important; justify-content:flex-start !important; gap:6px !important; min-height:30px; overflow:hidden;}',
+      '.CourseCard .CardFooter [role="info"][aria-label^="Presiona tab para ver las insignias"]{display:flex !important; align-items:center !important; min-width:0; flex-shrink:1;}',
+      '.CourseCard .CardFooter .CardBodyimgbadges{width:20px !important; height:20px !important; display:block;}',
+      '.CourseCard .CardFooter span.mx-1{margin:0 2px !important;}',
+      '.CourseCard .CardFooter .hiddebutton{position:static !important; margin:0 !important; margin-left:auto !important; padding:2px 4px !important; line-height:1 !important; flex-shrink:0;}',
+      '.CourseCard .CardFooter .hiddebutton mat-icon{font-size:20px !important;}',
+      '.CourseCard .CardFooter .fa-folder, .CourseCard .CardFooter .fa-2xl, .CourseCard .CardFooter > i{font-size:20px !important; line-height:1 !important; vertical-align:middle !important;}'
+    ].join('\n');
+    let st=document.getElementById('ep-card-compact');
+    if(on){
+      if(!st){ st=document.createElement('style'); st.id='ep-card-compact'; (document.head||document.documentElement).appendChild(st); }
+      if(st.textContent!==CSS) st.textContent=CSS;
+    } else if(st) st.remove();
+    if(on && !window.__ep_compact_obs){
+      window.__ep_compact_obs=new MutationObserver(()=>{
+        if(Date.now()-(window.__ep_compact_last||0)<200) return; window.__ep_compact_last=Date.now();
+        __ep_compactCardsRun();
+      });
+      try{ window.__ep_compact_obs.observe(document.documentElement,{childList:true,subtree:true}); }catch{}
+      __ep_compactCardsRun();
+    } else if(!on && window.__ep_compact_obs){
+      try{ window.__ep_compact_obs.disconnect(); }catch{}
+      window.__ep_compact_obs=null;
+      __ep_compactCardsUndo();
+    }
+  }catch{}
+}
+// Barra difuminada (vidrio esmerilado en .m-brand__tools/.m-brand/.m-header): translúcida
+// con el acento + blur. Modo oscuro: mezcla profunda. CSS de alta especificidad (0,3,1)
+// cubre elementos futuros; el pintado INLINE !important es la capa que SIEMPRE gana a la
+// hoja de marca y a la skin del sitio. Default OFF.
+function __ep_frostedPaint(){
+  try{
+    // Acento RESUELTO (hex concreto): el inline lleva el color, no la var — así el
+    // cambio de acento repinta la barra al instante (applyEpConfig → __ep_applyFrostedBar).
+    let acc = String(getComputedStyle(document.documentElement).getPropertyValue('--ep-accent') || '').trim();
+    if(!/^#[0-9a-fA-F]{6}$/.test(acc)) acc = '#06b6d4';
+    const dark=document.documentElement.classList.contains('ep-dark');
+    const bg = dark
+      ? 'color-mix(in srgb, ' + acc + ' 28%, rgba(10,16,28,0.60))'
+      : 'color-mix(in srgb, ' + acc + ' 46%, transparent)';
+    const blur='blur(22px) saturate(' + (dark?'165':'180') + '%)';
+    document.querySelectorAll('.m-brand__tools, .m-brand.m-brand, .m-header.m-header, [class*="m-brand--skin-"], [class*="m-header--skin-"]').forEach(el=>{
+      try{
+        if(el.closest('.m-aside')) return; // el menú lateral queda sólido
+        el.dataset.epFrosted='1';
+        el.style.setProperty('background-color', bg, 'important');
+        el.style.setProperty('background-image', 'none', 'important');
+        el.style.setProperty('backdrop-filter', blur, 'important');
+        el.style.setProperty('-webkit-backdrop-filter', blur, 'important');
+        // El color base puede vivir en un CONTENEDOR detrás de la barra (header/topbar):
+        // la cadena de ancestros del header queda transparente para que el blur del
+        // contenido pase y no asome el verde sólido.
+        let up=el.parentElement, hops=0;
+        while(up && up!==document.body && hops<8){
+          const cls=String(up.className||'');
+          if(/m-(header|brand|topbar)|MainBgColor/i.test(cls) || up.tagName==='HEADER' || /^M-(HEADER|TOPBAR|BRAND)$/.test(up.tagName)){
+            up.dataset.epFrosted='1';
+            up.style.setProperty('background-color','transparent','important');
+            up.style.setProperty('background-image','none','important');
+            up=up.parentElement; hops++;
+          } else break;
+        }
+      }catch{}
+    });
+    // Capas contenedoras directas (creadas por Angular, a veces sin la barra como hijo):
+    // <m-header> y HEADER.MainBgColor* — las capas sólidas verde/azul del header.
+    document.querySelectorAll('m-header, [class*="MainBgColor"]').forEach(el=>{
+      try{
+        if(el.closest('.m-aside')) return;
+        el.dataset.epFrosted='1';
+        el.style.setProperty('background-color','transparent','important');
+        el.style.setProperty('background-image','none','important');
+      }catch{}
+    });
+  }catch{}
+}
+function __ep_frostedUnpaint(){
+  try{
+    document.querySelectorAll('[data-ep-frosted]').forEach(el=>{
+      try{
+        ['background-color','background-image','backdrop-filter','-webkit-backdrop-filter'].forEach(p=>el.style.removeProperty(p));
+        delete el.dataset.epFrosted;
+      }catch{}
+    });
+  }catch{}
+}
+function __ep_applyFrostedBar(on){
+  try{
+    const CSS=[
+      'html .m-brand.m-brand, html .m-brand__tools.m-brand__tools, html .m-header.m-header, html .m-brand__tools.m-stack__item[class*="m-brand--skin-"], html .m-header[class*="m-header--skin-"]{',
+      '  background-color: color-mix(in srgb, var(--ep-accent, #06b6d4) 46%, transparent) !important;',
+      '  background-image:none !important;',
+      '  -webkit-backdrop-filter: blur(22px) saturate(180%) !important;',
+      '  backdrop-filter: blur(22px) saturate(180%) !important;',
+      '  box-shadow: 0 1px 0 rgba(255,255,255,0.10) inset, 0 8px 24px rgba(2,8,23,0.10) !important;',
+      '}',
+      'html.ep-dark .m-brand.m-brand, html.ep-dark .m-brand__tools.m-brand__tools, html.ep-dark .m-header.m-header, html.ep-dark .m-brand__tools.m-stack__item[class*="m-brand--skin-"], html.ep-dark .m-header[class*="m-header--skin-"]{',
+      '  background-color: color-mix(in srgb, var(--ep-accent, #06b6d4) 28%, rgba(10,16,28,0.60)) !important;',
+      '  -webkit-backdrop-filter: blur(22px) saturate(165%) !important;',
+      '  backdrop-filter: blur(22px) saturate(165%) !important;',
+      '  box-shadow: 0 1px 0 rgba(255,255,255,0.06) inset, 0 8px 24px rgba(0,0,0,0.45) !important;',
+      '}'
+    ].join('\n');
+    let st=document.getElementById('ep-frosted-bar');
+    if(on){
+      if(!st){ st=document.createElement('style'); st.id='ep-frosted-bar'; (document.head||document.documentElement).appendChild(st); }
+      if(st.textContent!==CSS) st.textContent=CSS;
+      __ep_frostedPaint();
+      // Repintador: Angular/tema pueden recrear o retocar la barra (y el modo oscuro
+      // cambia html.ep-dark) — re-aplica el inline con throttle.
+      if(!window.__ep_frosted_obs){
+        window.__ep_frosted_obs=new MutationObserver(()=>{
+          if(Date.now()-(window.__ep_frosted_last||0)<1200) return; window.__ep_frosted_last=Date.now();
+          if(loadEpConfig().frostedBar) __ep_frostedPaint();
+        });
+        try{ window.__ep_frosted_obs.observe(document.documentElement,{childList:true,subtree:true,attributes:true,attributeFilter:['class','style']}); }catch{}
+      }
+    } else {
+      if(st) st.remove();
+      __ep_frostedUnpaint();
+      if(window.__ep_frosted_obs){ try{ window.__ep_frosted_obs.disconnect(); }catch{} window.__ep_frosted_obs=null; }
+    }
+  }catch{}
+}
 // FIX persistencia: restaura config del respaldo (chrome.storage sobrevive al clear de Eminus
 // y al reinicio) si localStorage+sessionStorage quedaron vacíos — p. ej. pestaña nueva tras logout
 try {
@@ -604,6 +1157,137 @@ try {
     } catch {}
   }).catch(() => {});
 } catch {}
+// ===== Logo por temporada: reemplaza el logo de login y la marca de la barra por el GIF
+// de la festividad del momento (assets/temporadas). Rangos de fechas mexicanas (local,
+// inclusive); los rangos NO se traslapan. Default activado — el usuario puede apagarlo. =====
+const EP_SEASONAL_LOGOS = [
+  { f:'Login_interior_anio_nuevo.gif',          from:[12,30], to:[12,31], name:'Año Nuevo', dyn:'anionuevo' },
+  { f:'Login_interior_anio_nuevo.gif',          from:[1,1],   to:[1,3],   name:'Año Nuevo', dyn:'anionuevo' },
+  { f:'Login_interior_reyes_magos.gif',         from:[1,4],   to:[1,8],   name:'Reyes Magos (6 ene)' },
+  { f:'Login_interior_amor_amistad.gif',        from:[2,12],  to:[2,15],  name:'Día del Amor y la Amistad (14 feb)' },
+  { f:'Login_interior_dia_bandera.gif',         from:[2,23],  to:[2,25],  name:'Día de la Bandera (24 feb)' },
+  { f:'Login_interior_aniversario_uv.gif',      from:[9,10],  to:[9,12],  name:'Aniversario UV (11 sep)' },
+  { f:'Login_interior_dia_de_muertos.gif',      from:[10,31], to:[11,2],  name:'Día de Muertos' },
+  { f:'Login_interior_fiestas_patrias.gif',     from:[9,13],  to:[9,17],  name:'Fiestas Patrias (15-16 sep)' },
+  { f:'Login_interior_revolucion_mexicana.gif', dyn:'revolucion',          name:'Revolución Mexicana' },
+  { f:'Login_interior_posadas.gif',             from:[12,16], to:[12,23], name:'Posadas' },
+  { f:'Login_interior_nochebuena.gif',          from:[12,24], to:[12,26], name:'Navidad' }
+];
+// Revolución Mexicana: el feriado oficial es el TERCER LUNES de noviembre (LFT art. 74);
+// la ventana va de ese lunes al viernes de la misma semana (cubre el puente y el 20 fijo).
+function __ep_revolucionRange(){
+  try{
+    const y = new Date().getFullYear();
+    const dow = new Date(y,10,1).getDay();
+    const lm = 1 + ((8 - dow) % 7) + 14;
+    return [11*100 + lm, 11*100 + lm + 4];
+  }catch{ return [1120, 1124]; }
+}
+function __ep_seasonalFile(){
+  try{
+    const d = new Date(), key = (d.getMonth()+1)*100 + d.getDate();
+    for(const s of EP_SEASONAL_LOGOS){
+      let a, b;
+      if(s.dyn === 'revolucion'){ const r = __ep_revolucionRange(); a = r[0]; b = r[1]; }
+      else { a = s.from[0]*100 + s.from[1]; b = s.to[0]*100 + s.to[1]; }
+      if(a <= b ? (key >= a && key <= b) : (key >= a || key <= b)){
+        try{
+          if(s.dyn === 'anionuevo') window.__ep_seasonal_ctx = { season:'anionuevo', year: d.getFullYear() + (s.from[0] === 12 ? 1 : 0) };
+          else window.__ep_seasonal_ctx = null;
+        }catch{}
+        return s.f;
+      }
+    }
+  }catch{}
+  try{ window.__ep_seasonal_ctx = null; }catch{}
+  return '';
+}
+function __ep_seasonalLogoTargets(){
+  const out = [];
+  try{
+    document.querySelectorAll('.m-brand__logo img, .m-brand__logo-wrapper img, img.m-brand__logo-wrapper, .m-brand img[src*="logo"]').forEach(im=>{
+      try{
+        if(!im || !im.isConnected) return;
+        try{ if(im.closest('.m-login__title_system') || im.closest('.helpImageBackground')) return; }catch{}
+        let w = 0, h = 0;
+        try{ const r = im.getBoundingClientRect(); w = r.width; h = r.height; }catch{}
+        if(!w && im.width) w = im.width;
+        if(!h && im.height) h = im.height;
+        if(w >= 40 && h >= 20) out.push(im);
+      }catch{}
+    });
+  }catch{}
+  return out;
+}
+function __ep_applySeasonalLogo(on){
+  const file = on ? __ep_seasonalFile() : '';
+  const url = file ? chrome.runtime.getURL('assets/temporadas/' + file) : '';
+  if(!on || !file){
+    document.querySelectorAll('img[data-ep-seasonal]').forEach(im=>{
+      try{
+        if(im.dataset.epSeasonalSrc) im.src = im.dataset.epSeasonalSrc;
+        delete im.dataset.epSeasonal; delete im.dataset.epSeasonalSrc;
+      }catch{}
+    });
+    if(window.__ep_seasonal_obs){ try{ window.__ep_seasonal_obs.disconnect(); }catch{} window.__ep_seasonal_obs = null; }
+    return;
+  }
+  __ep_seasonalLogoTargets().forEach(im=>{
+    try{
+      if(im.dataset.epSeasonal === '1'){ im.src = url; return; }
+      im.dataset.epSeasonalSrc = im.src;
+      im.dataset.epSeasonal = '1';
+      im.src = url;
+    }catch{}
+  });
+  // Año Nuevo por año: si existe Login_interior_anio_nuevo_<año>.gif (ej. _2028, _2029),
+  // se sondea con un Image y se intercambia sobre el genérico; si no existe, queda el genérico.
+  try{
+    const ctx = window.__ep_seasonal_ctx;
+    if(ctx && ctx.season === 'anionuevo'){
+      const probe = window.__ep_seasonal_yearProbe;
+      if(probe && probe.year === ctx.year){
+        if(probe.url){
+          document.querySelectorAll('img[data-ep-seasonal]').forEach(el=>{ try{ el.src = probe.url; }catch{} });
+        }
+      } else {
+        window.__ep_seasonal_yearProbe = { year: ctx.year, url: null };
+        const yu = chrome.runtime.getURL('assets/temporadas/Login_interior_anio_nuevo_' + ctx.year + '.gif');
+        const py = new Image();
+        py.onload = () => {
+          try{
+            if(window.__ep_seasonal_yearProbe && window.__ep_seasonal_yearProbe.year === ctx.year){
+              window.__ep_seasonal_yearProbe.url = yu;
+              document.querySelectorAll('img[data-ep-seasonal]').forEach(el=>{ try{ el.src = yu; }catch{} });
+            }
+          }catch{}
+        };
+        py.src = yu;
+      }
+    }
+  }catch{}
+  // Escalera de arranque: si el logo todavia no existe en el DOM, reintentar pronto
+  if(!window.__ep_seasonal_ladder){
+    window.__ep_seasonal_ladder = true;
+    [120, 350, 800, 1500, 2600].forEach(ms=>{
+      setTimeout(()=>{ try{ if(loadEpConfig().seasonalLogo) __ep_applySeasonalLogo(true); }catch{} }, ms);
+    });
+  }
+  // Observador con trailing edge: la ULTIMA mutacion de una rafaga siempre dispara
+  // (antes el throttle descartaba y el logo podia quedarse sin cambiar si el DOM quedaba quieto)
+  if(!window.__ep_seasonal_obs){
+    window.__ep_seasonal_obs = new MutationObserver(()=>{
+      if(window.__ep_seasonal_t) return;
+      const espera = Math.max(0, 400 - (Date.now() - (window.__ep_seasonal_last||0)));
+      window.__ep_seasonal_t = setTimeout(()=>{
+        window.__ep_seasonal_t = null;
+        window.__ep_seasonal_last = Date.now();
+        try{ if(!loadEpConfig().seasonalLogo) return; __ep_applySeasonalLogo(true); }catch{}
+      }, espera);
+    });
+    try{ window.__ep_seasonal_obs.observe(document.documentElement, { childList:true, subtree:true }); }catch{}
+  }
+}
 function applyEpConfig(cfg){
   try{
     const c = { ...EP_DEFAULT_CONFIG, ...cfg };
@@ -859,6 +1543,7 @@ function applyEpConfig(cfg){
           background-color: ${accent} !important;
           border-color: ${accent} !important;
           color: #fff !important;
+          box-shadow: none !important;
         }
         .ep-schedule-card.is-next{ background: linear-gradient(135deg, ${accent}08, ${accent}14) !important; border-color: ${accent}33 !important; }
         .ep-mail-item.unread, .ep-mail-item.unread .announcement-hero, .ep-mail-item.unread .card-body-spec.is-announcement .announcement-hero{ background: linear-gradient(180deg, ${accent}0A, #ffffff) !important; border-color: ${accent}33 !important; }
@@ -934,6 +1619,32 @@ function applyEpConfig(cfg){
           border: 1px solid transparent !important;
           color: ${accent} !important;
         }
+        /* FIX oscuro unread: el bloque premium de arriba pinta degradados BLANCOS !important
+           sin variante dark (el avatar y el announce-icon heredaban el blanco del contenedor).
+           Mismo lenguaje, superficie #141e33/#1e2e4a y tinte accent translúcido. */
+        html.ep-dark .ep-mail-item.unread, html.ep-dark .ep-mail-item.unread .announcement-hero, html.ep-dark .ep-mail-item.unread .card-body-spec, html.ep-dark .ep-mail-item.unread .card-body-spec.is-announcement, html.ep-dark .ep-mail-item.unread .card-body-spec.is-announcement .announcement-hero{
+          background: linear-gradient(180deg, ${accent}0A, #141e33) !important;
+          background-color: #141e33 !important;
+          border-color: rgba(42,63,98,0.85) !important;
+        }
+        html.ep-dark .ep-mail-item.unread[style*="background"], html.ep-dark .ep-mail-item.unread [style*="background: rgb"], html.ep-dark .ep-mail-item.unread [style*="background:#"], html.ep-dark .ep-mail-item.unread [style*="background: #"]{
+          background: linear-gradient(180deg, ${accent}0A, #141e33) !important;
+        }
+        html.ep-dark .ep-mail-item.unread .card-body-spec.is-announcement .announcement-hero, html.ep-dark .ep-mail-item.unread .card-body-spec.is-announcement .announcement-hero *{
+          background: transparent !important;
+          border-color: rgba(42,63,98,0.85) !important;
+        }
+        html.ep-dark .ep-mail-item.unread .announce-icon, html.ep-dark .ep-mail-item.unread .is-announce-course, html.ep-dark .ep-mail-item.unread .mail-sender-row-spec, html.ep-dark .ep-mail-item.unread .mail-sender-row-spec .mail-avatar-spec{
+          background: ${accent}14 !important;
+          border-color: ${accent}33 !important;
+          color: ${accent} !important;
+        }
+        html.ep-dark .ep-mail-item.unread .urgency-pill-spec.is-unread, html.ep-dark .ep-mail-item .footer-row-spec .urgency-pill-spec.is-unread, html.ep-dark .act-item .footer-row-spec .urgency-pill-spec.is-unread, html.ep-dark .act-item.unread .footer-row-spec .urgency-pill-spec.is-unread{
+          background: linear-gradient(#1e2e4a, #1e2e4a) padding-box, linear-gradient(135deg, ${accent}33, ${accent}55) border-box !important;
+          background-color: #1e2e4a !important;
+          border: 1px solid transparent !important;
+          color: ${accent} !important;
+        }
         html .ep-schedule-status.live, html .ep-schedule-tab.active .ep-tab-count, html .ep-schedule-error a{
           background: linear-gradient(135deg, ${accent}, ${accent}DD) !important;
           border-color: ${accent} !important;
@@ -953,11 +1664,11 @@ function applyEpConfig(cfg){
         }
         .ep-schedule-tab .ep-tab-count{ background: #f1f5f9 !important; color: #475569 !important; border: 1px solid #e2e8f0 !important; }
         .ep-schedule-tab.active .ep-tab-count{
-          background: linear-gradient(135deg, ${accent}, ${accent}DD) !important; color: #fff !important; border-color: ${accent} !important;
+          background: linear-gradient(135deg, ${accent}, ${accent}DD) !important; color: #fff !important; border-color: ${accent} !important; box-shadow: none !important;
         }
         .ep-schedule-tab.is-today{ border-color: #e2e8f0 !important; background: #fff !important; }
         .ep-schedule-tab.is-today .ep-tab-count{ background: #f1f5f9 !important; color: #475569 !important; border-color: #e2e8f0 !important; }
-        .ep-schedule-tab.active.is-today .ep-tab-count{ background: linear-gradient(135deg, ${accent}, ${accent}DD) !important; color: #fff !important; border-color: ${accent} !important; }
+        .ep-schedule-tab.active.is-today .ep-tab-count{ background: linear-gradient(135deg, ${accent}, ${accent}DD) !important; color: #fff !important; border-color: ${accent} !important; box-shadow: none !important; }
         .ep-schedule-tab:focus-visible{ outline-color: ${accent} !important; }
         .ep-schedule-status.next, .ep-miuv-exam-nrc, .ep-miuv-grade-chip{
           border-color: ${accent}33 !important;
@@ -1000,6 +1711,9 @@ function applyEpConfig(cfg){
       `;
       }
       const brandEl=document.querySelector('.m-brand--skin-green, .m-brand--skin-blue, .m-brand--skin-purple, .m-brand__tools.m-brand--skin-green, .m-brand__tools.m-brand--skin-blue, .m-brand__tools.m-brand--skin-purple, .m-brand__tools, [class*="m-brand--skin-"]');
+      // FIX U5/U4: superficie de inline paints consciente del tema oscuro (cfg.dark es el estado NUEVO;
+      // la clase ep-dark se sincroniza mas abajo, despues de este painter)
+      const epDarkNow = !!(cfg && cfg.dark) || document.documentElement.classList.contains('ep-dark');
       // FIX: botones verdes (Modo lista, Mi perfil, Cerrar sesión) y BTN_SEARCH → acento
       // (el submit de login lo posee __ep_forceLoginBtnWhite en exclusiva: skip siempre)
       try{
@@ -1126,13 +1840,29 @@ function applyEpConfig(cfg){
               const prevTrans=el.style.transition;
               el.style.setProperty('transition', 'none', 'important');
               if(tab.classList.contains('active')){
-                el.style.setProperty('background', `linear-gradient(135deg, ${accent}, ${accent}DD)`, 'important');
-                el.style.setProperty('border-color', accent, 'important');
-                el.style.setProperty('color', '#fff', 'important');
+                if(epDarkNow && tab.classList.contains('is-today')){
+                  // FIX oscuro+today: tab activo hoy usa acento oscurecido → badge neutro para contrastar
+                  el.style.setProperty('background', '#1e2e4a', 'important');
+                  el.style.setProperty('border-color', '#94a3b8', 'important');
+                  el.style.setProperty('box-shadow', '0 0 0 3px rgba(0,0,0,0.35)', 'important');
+                  el.style.setProperty('color', '#f1f5f9', 'important');
+                } else if(epDarkNow){
+                  // FIX oscuro: badge separado del tab oscuro (borde luminoso + anillo suave del acento)
+                  el.style.setProperty('background', `linear-gradient(135deg, ${accent}, ${accent}E6)`, 'important');
+                  el.style.setProperty('border-color', 'rgba(255,255,255,0.45)', 'important');
+                  el.style.setProperty('box-shadow', '0 0 0 3px var(--ep-accent-soft, rgba(255,255,255,0.10))', 'important');
+                  el.style.setProperty('color', '#fff', 'important');
+                } else {
+                  el.style.setProperty('background', `linear-gradient(135deg, ${accent}, ${accent}DD)`, 'important');
+                  el.style.setProperty('border-color', accent, 'important');
+                  el.style.removeProperty('box-shadow');
+                  el.style.setProperty('color', '#fff', 'important');
+                }
               } else {
-                el.style.setProperty('background', '#f1f5f9', 'important');
-                el.style.setProperty('border-color', '#e2e8f0', 'important');
-                el.style.setProperty('color', '#475569', 'important');
+                el.style.setProperty('background', epDarkNow ? '#1e2e4a' : '#f1f5f9', 'important');
+                el.style.setProperty('border-color', epDarkNow ? '#2a3f62' : '#e2e8f0', 'important');
+                el.style.setProperty('color', epDarkNow ? '#cbd5e1' : '#475569', 'important');
+                el.style.removeProperty('box-shadow');
               }
               void el.offsetHeight;
               el.style.setProperty('transition', 'none', 'important');
@@ -1153,9 +1883,27 @@ function applyEpConfig(cfg){
           document.querySelectorAll('.ep-schedule-tab.active .ep-tab-count, .ep-schedule-status.live').forEach(el=>{
             const prev=el.style.transition;
             el.style.setProperty('transition', 'none', 'important');
-            el.style.setProperty('background', `linear-gradient(135deg, ${accent}, ${accent}DD)`, 'important');
+            const _tab = el.closest('.ep-schedule-tab');
+            if(_tab && epDarkNow && _tab.classList.contains('is-today')){
+              // FIX oscuro+today: badge neutro sobre el acento oscurecido
+              el.style.setProperty('background', '#1e2e4a', 'important');
+              el.style.setProperty('background-color', '#1e2e4a', 'important');
+              el.style.setProperty('border-color', '#94a3b8', 'important');
+              el.style.setProperty('box-shadow', '0 0 0 3px rgba(0,0,0,0.35)', 'important');
+              el.style.setProperty('color', '#f1f5f9', 'important');
+              void el.offsetHeight;
+              el.style.transition=prev;
+              return;
+            }
+            el.style.setProperty('background', `linear-gradient(135deg, ${accent}, ${accent}${epDarkNow?'E6':'DD'})`, 'important');
             el.style.setProperty('background-color', accent, 'important');
-            el.style.setProperty('border-color', accent, 'important');
+            if(epDarkNow){
+              el.style.setProperty('border-color', 'rgba(255,255,255,0.45)', 'important');
+              el.style.setProperty('box-shadow', '0 0 0 3px var(--ep-accent-soft, rgba(255,255,255,0.10))', 'important');
+            } else {
+              el.style.setProperty('border-color', accent, 'important');
+              el.style.removeProperty('box-shadow');
+            }
             el.style.setProperty('color', '#fff', 'important');
             void el.offsetHeight;
             el.style.transition=prev;
@@ -1165,7 +1913,9 @@ function applyEpConfig(cfg){
             el.style.setProperty('border-color', accent+'33', 'important');
           });
           document.querySelectorAll('.ep-mail-item.unread').forEach(el=>{
-            el.style.setProperty('background', `linear-gradient(180deg, ${accent}0A, #ffffff)`, 'important');
+            // FIX U5: en oscuro el degradado termina en superficie oscura, no en blanco
+            el.style.setProperty('background', `linear-gradient(180deg, ${accent}0A, ${epDarkNow ? '#1a2742' : '#ffffff'})`, 'important');
+            el.style.setProperty('background-color', epDarkNow ? '#1a2742' : 'transparent', 'important');
             el.style.setProperty('border-color', accent+'33', 'important');
           });
         }catch{}
@@ -1278,12 +2028,28 @@ function applyEpConfig(cfg){
               b.style.setProperty('border-color', 'transparent', 'important');
               if(getComputedStyle(b).color!==t) b.style.setProperty('color', t, 'important');
             });
-            // FIX: etiquetas de urgencia siempre blancas (texto + icono), en ambos modos
+            // FIX letras blancas: la etiqueta e icono de las píldoras de urgencia van BLANCOS
+            // en claro y oscuro (petición) — sombra sutil para legibilidad sobre urgencias claras.
             document.querySelectorAll('.act-item .urgency-pill-spec .pill-label, .activity-days-left').forEach(el=>{
-              if(getComputedStyle(el).color!=='rgb(255, 255, 255)') el.style.setProperty('color', '#fff', 'important');
+              try{
+                const pill = el.closest('.urgency-pill-spec');
+                const host = pill ? (pill.closest('.act-item') || pill.closest('.ep-mail-item')) : null;
+                const lvl = host ? (host.classList.contains('warning') ? 'warning' : host.classList.contains('urgent') ? 'urgent' : host.classList.contains('safe') ? 'safe' : null) : null;
+                if (lvl) {
+                  const _epDarkLbl = document.documentElement.classList.contains('ep-dark');
+                  el.style.setProperty('color', '#ffffff', 'important');
+                  el.style.setProperty('text-shadow', _epDarkLbl ? '0 1px 2px rgba(0,0,0,0.45)' : '0 1px 2px rgba(0,0,0,0.35)', 'important');
+                } else { el.style.removeProperty('color'); el.style.removeProperty('text-shadow'); }
+              }catch{}
             });
             document.querySelectorAll('.act-item .urgency-pill-spec svg').forEach(s=>{
-              if(getComputedStyle(s).color!=='rgb(255, 255, 255)') s.style.setProperty('color', '#fff', 'important');
+              try{
+                const pill = s.closest('.urgency-pill-spec');
+                const host = pill ? (pill.closest('.act-item') || pill.closest('.ep-mail-item')) : null;
+                const lvl = host ? (host.classList.contains('warning') ? 'warning' : host.classList.contains('urgent') ? 'urgent' : host.classList.contains('safe') ? 'safe' : null) : null;
+                if (lvl) s.style.setProperty('color', '#ffffff', 'important');
+                else s.style.removeProperty('color');
+              }catch{}
             });
             document.querySelectorAll('.BTN_SEARCH, span.BTN_SEARCH').forEach(b=>{
               if(getComputedStyle(b).backgroundColor!==accent) b.style.setProperty('background-color', accent, 'important');
@@ -1309,10 +2075,11 @@ function applyEpConfig(cfg){
               el.querySelectorAll('svg').forEach(s=>{ s.style.setProperty('stroke', accent, 'important'); });
             });
             document.querySelectorAll('.ask-btn-spec').forEach(el=>{
+              let tAsk = '#fff'; try { tAsk = __ep_btnText(accent); } catch {}
               el.style.setProperty('background', accent, 'important');
               el.style.setProperty('border-color', accent, 'important');
-              el.style.setProperty('color', '#fff', 'important');
-              el.querySelectorAll('svg').forEach(s=> s.style.setProperty('stroke', '#fff', 'important'));
+              el.style.setProperty('color', tAsk, 'important');
+              el.querySelectorAll('svg').forEach(s=> s.style.setProperty('stroke', tAsk, 'important'));
             });
             document.querySelectorAll('.urgency-pill-spec.is-sent, .urgency-pill-spec.is-sent *').forEach(el=>{
               el.style.setProperty('background', accent+'14', 'important');
@@ -1325,14 +2092,22 @@ function applyEpConfig(cfg){
               const prevT=el.style.transition;
               el.style.setProperty('transition', 'none', 'important');
               if(tab.classList.contains('active')){
-                el.style.setProperty('background', `linear-gradient(135deg, ${accent}, ${accent}DD)`, 'important');
-                el.style.setProperty('border-color', accent, 'important');
+                if(epDarkNow){
+                  el.style.setProperty('background', `linear-gradient(135deg, ${accent}, ${accent}E6)`, 'important');
+                  el.style.setProperty('border-color', 'rgba(255,255,255,0.45)', 'important');
+                  el.style.setProperty('box-shadow', '0 0 0 3px var(--ep-accent-soft, rgba(255,255,255,0.10))', 'important');
+                } else {
+                  el.style.setProperty('background', `linear-gradient(135deg, ${accent}, ${accent}DD)`, 'important');
+                  el.style.setProperty('border-color', accent, 'important');
+                  el.style.removeProperty('box-shadow');
+                }
                 el.style.setProperty('color', '#fff', 'important');
-              } else {
-                el.style.setProperty('background', '#f1f5f9', 'important');
-                el.style.setProperty('border-color', '#e2e8f0', 'important');
-                el.style.setProperty('color', '#475569', 'important');
-              }
+            } else {
+            el.style.setProperty('background', epDarkNow ? '#1e2e4a' : '#f1f5f9', 'important');
+            el.style.setProperty('border-color', epDarkNow ? '#2a3f62' : '#e2e8f0', 'important');
+            el.style.setProperty('color', epDarkNow ? '#cbd5e1' : '#475569', 'important');
+            el.style.removeProperty('box-shadow');
+            }
               void el.offsetHeight;
               el.style.transition=prevT;
             });
@@ -1345,9 +2120,15 @@ function applyEpConfig(cfg){
               if(getComputedStyle(el).backgroundColor!==accent){
                 const _prevT2=el.style.transition;
                 el.style.setProperty('transition', 'none', 'important');
-                el.style.setProperty('background', `linear-gradient(135deg, ${accent}, ${accent}DD)`, 'important');
+                el.style.setProperty('background', `linear-gradient(135deg, ${accent}, ${accent}${epDarkNow?'E6':'DD'})`, 'important');
                 el.style.setProperty('background-color', accent, 'important');
-                el.style.setProperty('border-color', accent, 'important');
+                if(epDarkNow){
+                  el.style.setProperty('border-color', 'rgba(255,255,255,0.45)', 'important');
+                  el.style.setProperty('box-shadow', '0 0 0 3px var(--ep-accent-soft, rgba(255,255,255,0.10))', 'important');
+                } else {
+                  el.style.setProperty('border-color', accent, 'important');
+                  el.style.removeProperty('box-shadow');
+                }
                 el.style.setProperty('color', '#fff', 'important');
                 void el.offsetHeight;
                 el.style.transition=_prevT2;
@@ -1416,16 +2197,24 @@ function applyEpConfig(cfg){
               if(cnt){
                 cnt.style.setProperty('transition','none','important');
                 if(isActive){
-                  cnt.style.setProperty('background', `linear-gradient(135deg, ${accent}, ${accent}DD)`, 'important');
+                  if(epDarkNow){
+                    cnt.style.setProperty('background', `linear-gradient(135deg, ${accent}, ${accent}E6)`, 'important');
+                    cnt.style.setProperty('border-color', 'rgba(255,255,255,0.45)', 'important');
+                    cnt.style.setProperty('box-shadow', '0 0 0 3px var(--ep-accent-soft, rgba(255,255,255,0.10))', 'important');
+                  } else {
+                    cnt.style.setProperty('background', `linear-gradient(135deg, ${accent}, ${accent}DD)`, 'important');
+                    cnt.style.setProperty('border-color', accent, 'important');
+                    cnt.style.removeProperty('box-shadow');
+                  }
                   cnt.style.setProperty('background-color', accent, 'important');
-                  cnt.style.setProperty('border-color', accent, 'important');
                   cnt.style.setProperty('color', '#fff', 'important');
-                } else {
-                  cnt.style.setProperty('background', '#f1f5f9', 'important');
-                  cnt.style.setProperty('background-color', '#f1f5f9', 'important');
-                  cnt.style.setProperty('border-color', '#e2e8f0', 'important');
-                  cnt.style.setProperty('color', '#475569', 'important');
-                }
+            } else {
+              cnt.style.setProperty('background', epDarkNow ? '#1e2e4a' : '#f1f5f9', 'important');
+              cnt.style.setProperty('background-color', epDarkNow ? '#1e2e4a' : '#f1f5f9', 'important');
+              cnt.style.setProperty('border-color', epDarkNow ? '#2a3f62' : '#e2e8f0', 'important');
+              cnt.style.setProperty('color', epDarkNow ? '#cbd5e1' : '#475569', 'important');
+              cnt.style.removeProperty('box-shadow');
+            }
                 void cnt.offsetHeight;
               }
             });
@@ -1450,6 +2239,15 @@ function applyEpConfig(cfg){
     const wrapper = document.querySelector('.ep-wrapper');
     if(wrapper) wrapper.classList.toggle('ep-dark', !!c.dark);
     document.querySelectorAll('.ep-right-stack,.dues-container,.ep-schedule-widget,.ep-mail-widget,.ep-miuv-widget,.ep-config-widget').forEach(el=> el.classList.toggle('ep-dark', !!c.dark));
+    // FIX dark: fondo del widget de config en dark (inline = gana a cualquier regla/clase tardía)
+    try{
+      document.querySelectorAll('.ep-config-widget').forEach(w=>{
+        try{
+          if(c.dark){ w.style.setProperty('background','#141e33','important'); w.style.setProperty('border-color','#1e2e4a','important'); }
+          else { w.style.removeProperty('background'); w.style.removeProperty('border-color'); w.style.background='#fff'; w.style.borderColor='#e8ecf1'; }
+        }catch{}
+      });
+    }catch{}
     // FIX dark: fuerza contraste en overlays (mat-select / ng-select) por JS inline — gana a cualquier tema de Eminus
     try{
       const paintDarkOverlays = ()=>{
@@ -1596,6 +2394,16 @@ function applyEpConfig(cfg){
         if(window.__ep_hideUV_obs){ try{ window.__ep_hideUV_obs.disconnect(); }catch{} window.__ep_hideUV_obs=null; }
       }
     }catch(e){ console.warn('[EP] hideUV error',e); }
+    // ocultar nombre del encabezado — alterna la hoja #ep-hide-name al instante
+    try{ __ep_applyHideName(!!c.hideStudentName); }catch{}
+    // ocultar filtros (lista de cursos) — alterna la hoja #ep-hide-filters al instante
+    try{ __ep_applyHideFilters(!!c.hideFilters); }catch{}
+    // tarjeta compacta — CSS instantáneo + observer que reordena insignias/estrella/nombre
+    try{ __ep_applyCardCompact(!!c.cardCompact); }catch{}
+    // barra difuminada — alterna la hoja #ep-frosted-bar al instante
+    try{ __ep_applyFrostedBar(!!c.frostedBar); }catch{}
+    // logo por temporada — cambia el src de los logos por el GIF de la festividad activa
+    try{ __ep_applySeasonalLogo(!!c.seasonalLogo); }catch{}
     // mostrar facilitador — inyecta .ep-prof en cada CardBody
     try{
       const show = c.showFacilitator !== false;
@@ -1603,16 +2411,32 @@ function applyEpConfig(cfg){
       if(show){
         if(!fs){ fs=document.createElement('style'); fs.id='ep-fac-style'; fs.textContent='.ep-prof{display:flex !important;align-items:center;gap:10px;padding:10px 12px;margin-top:8px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;}.ep-prof-img{width:32px;height:32px;border-radius:999px;object-fit:cover;border:1px solid #e2e8f0;flex-shrink:0;}.ep-prof-info{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1;overflow:hidden;}.ep-prof-name{font-size:12px;font-weight:700;color:#0f172a;line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;}.ep-prof-role{font-size:10px;font-weight:600;letter-spacing:0.04em;text-transform:uppercase;color:#64748b;line-height:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;}.ep-prof-role.is-email{text-transform:none;letter-spacing:0;}@media (min-width:992px){.d-flex.flex-wrap>div.col-lg-3.col-md-12:has(mat-card.CourseCard){flex:0 0 33.333333% !important;max-width:33.333333% !important;}}'; document.head.appendChild(fs); }
         document.querySelectorAll('.ep-prof').forEach(el=> el.style.display='flex');
-        try{ if(typeof injectFacilitators==='function') injectFacilitators(); }catch{}
+        // FIX instantaneo: si las tarjetas aun no existen, waitForCards las espera
+        // (observer+poll); el call directo solo servia cuando ya habian cargado.
+        try{ if(typeof injectFacilitators==='function') waitForCards(()=>{ try{ injectFacilitators(); }catch{} }); }catch{}
         if(!window.__ep_fac_obs){
           window.__ep_fac_obs=new MutationObserver(()=>{
-            if(Date.now()-(window.__ep_hideUV_last||0) < 1200) return; window.__ep_hideUV_last=Date.now();
-            try{ if(!loadEpConfig().showFacilitator) return; if(typeof injectFacilitators==='function') injectFacilitators(); }catch{} });
+            // trailing edge: la ULTIMA mutacion de una rafaga siempre dispara
+            // (antes el throttle descartaba y el fac podia no correr si el DOM quedaba quieto)
+            if(window.__ep_fac_obs_t) return;
+            const _w = Math.max(0, 300 - (Date.now() - (window.__ep_fac_obs_last||0)));
+            window.__ep_fac_obs_t = setTimeout(()=>{
+              window.__ep_fac_obs_t = null;
+              window.__ep_fac_obs_last = Date.now();
+              try{ if(!loadEpConfig().showFacilitator) return; if(typeof injectFacilitators==='function') injectFacilitators(); }catch{}
+            }, _w);
+          });
           try{ window.__ep_fac_obs.observe(document.documentElement,{childList:true, subtree:true}); }catch{}
         }
       } else {
         if(fs) fs.remove();
-        document.querySelectorAll('.ep-prof').forEach(el=> el.style.display='none');
+        // FIX: remueve .ep-prof y limpia las marcas de las CardBody — con solo
+        // display:none quedaban data-ep-fac-done=1 y al reactivar no se repintaba
+        // (facilitador fantasma sin estilos corrompiendo la tarjeta compacta).
+        document.querySelectorAll('.ep-prof').forEach(el=>{ try{ el.remove(); }catch{} });
+        document.querySelectorAll('.CardBody[data-ep-prof-injected], .CardBody[data-ep-fac-done], .CardBody[data-ep-fac-topup-queued]').forEach(cb=>{
+          try{ delete cb.dataset.epProfInjected; delete cb.dataset.epFacDone; delete cb.dataset.epFacTopupQueued; }catch{}
+        });
         if(window.__ep_fac_obs){ try{ window.__ep_fac_obs.disconnect(); }catch{} window.__ep_fac_obs=null; }
       }
     }catch(e){ console.warn('[EP] fac error',e); }
@@ -1630,12 +2454,61 @@ function applyEpConfig(cfg){
     if(!document.querySelector('#ep-config-styles')){
       const s=document.createElement('style'); s.id='ep-config-styles';
       s.textContent=`
-        :root{ --ep-accent:#7c3aed; --ep-accent-soft:#7c3aed14; --ep-accent-ring:#7c3aed33; }
-        .ep-dark{ color-scheme: dark; }
-        .ep-dark body, body.ep-dark{ background:#0b1220 !important; }
+        :root{ --ep-accent:#7c3aed; --ep-accent-soft:#7c3aed14; --ep-accent-ring:#7c3aed33; --ep-meta-tx:#64748b; --ep-css-ver:6; }
+        .ep-dark{ color-scheme: dark; --ep-meta-tx:#94a3b8; }
+        /* FIX fondo custom: shorthand background pisa background-image en dark;
+        con fondo del usuario se suelta el sólido para que la imagen se vea */
+        html.ep-dark:not(.ep-has-bg) body{ background:#0b1220 !important; }
         .ep-dark .dues-container, .ep-dark .ep-schedule-widget, .ep-dark .ep-mail-widget, .ep-dark .ep-miuv-widget, .ep-dark .ep-config-widget{ background:#141e33 !important; border-color:#1e2e4a !important; box-shadow:0 8px 32px rgba(0,0,0,0.35), 0 0 0 1px rgba(255,255,255,0.04) inset !important; }
         html.ep-dark .acts-list{ background-color:#141e33 !important; background-image: radial-gradient(circle at 1px 1px, rgba(30,46,74,0.4) 1px, transparent 0) !important; }
         html.ep-dark .ep-config-header, html.ep-dark .ep-miuv-widget-header, html.ep-dark .ep-schedule-widget-header, html.ep-dark .ep-mail-widget-header{ background:rgba(20,30,51,0.9) !important; border-color:#1e2e4a !important; color:#e2e8f0 !important; }
+        /* FIX dark MiUV: armadura de alta especificidad para el header de MiUV (misma paleta
+           que config) — gana a cualquier regla clara tardía de getStylesFull con !important */
+        html.ep-dark .ep-widget-stack .ep-miuv-widget .ep-miuv-widget-header, html.ep-dark .ep-miuv-widget .ep-miuv-widget-header, html.ep-dark .ep-miuv-widget-header{
+          background:rgba(20,30,51,0.9) !important; background-image:none !important; border-color:#1e2e4a !important; border-bottom-color:#1e2e4a !important; color:#e2e8f0 !important;
+        }
+        html.ep-dark .ep-widget-stack .ep-miuv-widget .ep-miuv-widget-title, html.ep-dark .ep-miuv-widget .ep-miuv-widget-title, html.ep-dark .ep-miuv-widget-title{ color:#e2e8f0 !important; }
+        html.ep-dark .ep-widget-stack .ep-miuv-widget .ep-miuv-widget-title:hover::before, html.ep-dark .ep-miuv-widget-title:hover::before{ background:var(--ep-accent-soft) !important; border-color:var(--ep-accent-ring) !important; box-shadow:0 1px 2px rgba(0,0,0,0.35) !important; }
+        html.ep-dark .ep-widget-stack .ep-miuv-widget .ep-miuv-widget-count, html.ep-dark .ep-miuv-widget .ep-miuv-widget-count{ background:#1e2e4a !important; color:#94a3b8 !important; border-color:#2a3f62 !important; }
+        html.ep-dark .ep-widget-stack .ep-miuv-widget .ep-miuv-tabs, html.ep-dark .ep-miuv-widget .ep-miuv-tabs, html.ep-dark .ep-miuv-tabs{ background:rgba(20,30,51,0.9) !important; border-color:#1e2e4a !important; box-shadow:0 1px 2px rgba(0,0,0,0.3) inset !important; }
+        html.ep-dark .ep-widget-stack .ep-miuv-widget .ep-miuv-tab, html.ep-dark .ep-miuv-widget .ep-miuv-tab, html.ep-dark .ep-miuv-tab{ color:#94a3b8 !important; }
+        html.ep-dark .ep-widget-stack .ep-miuv-widget .ep-miuv-tab:hover, html.ep-dark .ep-miuv-widget .ep-miuv-tab:hover{ background:rgba(255,255,255,0.06) !important; color:#e2e8f0 !important; }
+        html.ep-dark .ep-widget-stack .ep-miuv-widget .ep-miuv-tab.active, html.ep-dark .ep-miuv-widget .ep-miuv-tab.active{ background:color-mix(in srgb, var(--ep-accent) 60%, black) !important; border-color:var(--ep-accent) !important; color:#ffffff !important; }
+        /* FIX dark Horario: misma armadura de alta especificidad que MiUV/config */
+        html.ep-dark .ep-widget-stack .ep-schedule-widget .ep-schedule-widget-header, html.ep-dark .ep-schedule-widget .ep-schedule-widget-header, html.ep-dark .ep-schedule-widget-header{
+          background:rgba(20,30,51,0.9) !important; background-image:none !important; border-color:#1e2e4a !important; border-bottom-color:#1e2e4a !important; color:#e2e8f0 !important;
+        }
+        html.ep-dark .ep-widget-stack .ep-schedule-widget .ep-schedule-widget-title, html.ep-dark .ep-schedule-widget .ep-schedule-widget-title, html.ep-dark .ep-schedule-widget-title{ color:#f1f5f9 !important; }
+        html.ep-dark .ep-widget-stack .ep-schedule-widget .ep-schedule-widget-title:hover::before, html.ep-dark .ep-schedule-widget-title:hover::before{ background:#1e2e4a !important; border-color:#2a3f62 !important; box-shadow:0 2px 6px rgba(0,0,0,0.35) !important; }
+        html.ep-dark .ep-widget-stack .ep-schedule-widget .ep-schedule-widget-count, html.ep-dark .ep-schedule-widget .ep-schedule-widget-count, html.ep-dark .ep-schedule-widget-count{ background:#1e2e4a !important; color:#cbd5e1 !important; border-color:#2a3f62 !important; box-shadow:0 1px 2px rgba(0,0,0,0.3) !important; }
+        html.ep-dark .ep-widget-stack .ep-schedule-widget .ep-schedule-tabs, html.ep-dark .ep-schedule-widget .ep-schedule-tabs, html.ep-dark .ep-schedule-tabs{ background:#0b1220 !important; border-color:#1e2e4a !important; box-shadow:0 1px 2px rgba(0,0,0,0.3) inset !important; }
+        html.ep-dark .ep-widget-stack .ep-schedule-widget .ep-schedule-tab, html.ep-dark .ep-schedule-widget .ep-schedule-tab, html.ep-dark .ep-schedule-tab{ color:#94a3b8 !important; }
+        html.ep-dark .ep-widget-stack .ep-schedule-widget .ep-schedule-tab:hover, html.ep-dark .ep-schedule-widget .ep-schedule-tab:hover{ background:rgba(255,255,255,0.06) !important; color:#e2e8f0 !important; }
+        html.ep-dark .ep-widget-stack .ep-schedule-widget .ep-schedule-tab.active, html.ep-dark .ep-schedule-widget .ep-schedule-tab.active{ background:color-mix(in srgb, var(--ep-accent) 60%, black) !important; border-color:transparent !important; color:#ffffff !important; box-shadow:0 1px 3px rgba(0,0,0,0.4) !important; }
+        html.ep-dark .ep-widget-stack .ep-schedule-widget .ep-schedule-tab.active:hover, html.ep-dark .ep-schedule-widget .ep-schedule-tab.active:hover{ filter:brightness(1.1) !important; }
+        html.ep-dark .ep-widget-stack .ep-schedule-widget .ep-schedule-tab.is-today, html.ep-dark .ep-schedule-widget .ep-schedule-tab.is-today{ background:var(--ep-accent-soft) !important; border-color:var(--ep-accent-ring) !important; color:color-mix(in srgb, var(--ep-accent) 62%, #ffffff) !important; }
+        html.ep-dark .ep-widget-stack .ep-schedule-widget .ep-schedule-tab.active.is-today, html.ep-dark .ep-schedule-widget .ep-schedule-tab.active.is-today{ background:color-mix(in srgb, var(--ep-accent) 60%, black) !important; border-color:transparent !important; color:#ffffff !important; box-shadow:0 1px 3px rgba(0,0,0,0.4) !important; }
+        html.ep-dark .ep-widget-stack .ep-schedule-widget .ep-tab-count, html.ep-dark .ep-schedule-widget .ep-tab-count{ background:#1e2e4a !important; color:#cbd5e1 !important; }
+        html.ep-dark .ep-widget-stack .ep-schedule-widget .ep-schedule-tab.active .ep-tab-count, html.ep-dark .ep-schedule-widget .ep-schedule-tab.active .ep-tab-count{ background:var(--ep-accent) !important; color:var(--ep-on-accent, #fff) !important; border-color:rgba(255,255,255,0.45) !important; box-shadow:0 0 0 3px var(--ep-accent-soft, rgba(255,255,255,0.10)) !important; }
+        /* FIX dark Correo: header y título con la misma armadura */
+        html.ep-dark .ep-widget-stack .ep-mail-widget .ep-mail-widget-header, html.ep-dark .ep-mail-widget .ep-mail-widget-header, html.ep-dark .ep-mail-widget-header{ background:rgba(20,30,51,0.9) !important; background-image:none !important; border-color:#1e2e4a !important; border-bottom-color:#1e2e4a !important; color:#e2e8f0 !important; }
+        html.ep-dark .ep-widget-stack .ep-mail-widget .ep-mail-widget-title, html.ep-dark .ep-mail-widget .ep-mail-widget-title, html.ep-dark .ep-mail-widget-title{ color:#f1f5f9 !important; }
+        html.ep-dark .ep-widget-stack .ep-mail-widget .ep-mail-widget-title:hover::before, html.ep-dark .ep-mail-widget-title:hover::before{ background:#1e2e4a !important; border-color:#2a3f62 !important; box-shadow:0 2px 6px rgba(0,0,0,0.35) !important; }
+        /* FIX dark Tareas: pestañas fijas (reemplazan dropdown) con la misma armadura */
+        html.ep-dark .dues-container .ep-tasks-tabs{ background:#0b1220 !important; border-color:#1e2e4a !important; box-shadow:0 1px 2px rgba(0,0,0,0.3) inset !important; }
+        html.ep-dark .dues-container .ep-tasks-tab{ color:#94a3b8 !important; }
+        html.ep-dark .dues-container .ep-tasks-tab:hover{ background:rgba(255,255,255,0.06) !important; color:#e2e8f0 !important; }
+        html.ep-dark .dues-container .ep-tasks-tab.active{ background:color-mix(in srgb, var(--ep-accent) 60%, black) !important; border-color:transparent !important; color:#ffffff !important; box-shadow:0 1px 3px rgba(0,0,0,0.4) !important; }
+        html.ep-dark .dues-container .ep-tasks-tab-count{ background:#1e2e4a !important; color:#cbd5e1 !important; border-color:#2a3f62 !important; }
+        html.ep-dark .dues-container .ep-tasks-tab-count.has-count{ background:var(--ep-accent-soft) !important; color:color-mix(in srgb, var(--ep-accent) 62%, #ffffff) !important; border-color:var(--ep-accent-ring) !important; }
+        html.ep-dark .dues-container .ep-tasks-tab.active .ep-tasks-tab-count{ background:#1e2e4a !important; color:#e2e8f0 !important; border-color:#2a3f62 !important; }
+        /* FIX U2/U3/U4: blindaje tardio de alta especificidad — la cabecera/cuerpo del config y los cuerpos de
+           widgets usan exactamente la misma paleta oscura que mail/miuv/schedule, y ganan a cualquier regla
+           clara de superficie (0,2,0)/(0,3,0) que aparezca despues en la hoja */
+        html.ep-dark .ep-widget-stack .ep-config-widget .ep-config-header, html.ep-dark .ep-config-widget .ep-config-header, html.ep-dark .ep-config-header{ background:rgba(20,30,51,0.9) !important; background-image:none !important; border-color:#1e2e4a !important; color:#e2e8f0 !important; }
+        html.ep-dark .ep-widget-stack .ep-config-widget .ep-config-body, html.ep-dark .ep-config-widget .ep-config-body, html.ep-dark .ep-config-body{ background:#141e33 !important; background-image:none !important; }
+        html.ep-dark .ep-widget-stack .ep-config-widget, html.ep-dark .ep-config-widget{ background:#141e33 !important; background-image:none !important; border-color:#1e2e4a !important; }
+        html.ep-dark .ep-mail-widget .ep-mail-widget-body, html.ep-dark .ep-schedule-widget .ep-schedule-widget-body, html.ep-dark .ep-miuv-widget .ep-miuv-widget-body{ background:#141e33 !important; background-image:none !important; }
         .ep-dark .ep-config-title, .ep-dark .ep-miuv-widget-title{ color:#e2e8f0 !important; }
         .dues-container, .ep-schedule-widget, .ep-mail-widget, .ep-miuv-widget, .ep-config-widget{
           background: #ffffff !important;
@@ -1719,8 +2592,23 @@ function applyEpConfig(cfg){
         .ep-wrapper.ep-side-left .ep-right-stack.ep-hidden, .ep-wrapper.ep-side-right .ep-right-stack.ep-hidden { margin-left:0 !important; margin-right:0 !important; }
         .ep-config-btn{ width:32px; height:32px; border-radius:999px; border:1px solid #e2e8f0; color:#475569; display:inline-flex; align-items:center; justify-content:center; cursor:pointer; transition: all 160ms ease; flex-shrink:0; }
         .ep-config-btn:hover{ background:#f8fafc; border-color:#cbd5e1; color:#0f172a; transform: translateY(-0.5px); }
+        /* FIX claro: el engranaje de la topbar NO lleva disco al pasar (transparente como los
+           demás botones de la barra; el blanco solo al activarlo). Los botones internos del
+           panel conservan su hover gris legible — por eso el scope .m-notification. */
+        html:not(.ep-dark) .m-notification .ep-config-btn:hover{ background:transparent !important; border-color:transparent !important; color:#0f172a !important; filter:none !important; }
         .ep-config-btn:active{ transform:scale(0.96); }
-        .ep-dark .ep-config-btn{ background:#1e2e4a; border-color:#2a3f62; color:#cbd5e1; }
+        .ep-dark .ep-config-btn{ background:transparent; border-color:rgba(148,163,184,0.25); color:#cbd5e1; }
+        /* FIX oscuro: el .ep-config-btn (topbar, cerrar del widget) es fantasma en oscuro
+           cuando NO está activado, igual que los demás botones de la barra; los botones
+           internos del panel (.ep-config-body) conservan su disco */
+        .ep-dark .ep-config-body .ep-config-btn{ background:#1e2e4a; border-color:#2a3f62; color:#cbd5e1; }
+        .ep-dark .ep-config-body .ep-config-btn:hover{ background:#233656; border-color:#334155; color:#f1f5f9; }
+        /* FIX U1: el .ep-config-btn del topbar y de la cabecera del config deben ser fantasma en oscuro,
+           no un disco #1e2e4a sobre superficie ya oscura; los botones internos del panel conservan el disco */
+        .ep-dark .ep-config-header .ep-config-btn{ background:transparent !important; border-color:rgba(148,163,184,0.28) !important; color:#94a3b8 !important; }
+        .ep-dark .ep-config-header .ep-config-btn:hover{ background:rgba(148,163,184,0.14) !important; border-color:rgba(148,163,184,0.45) !important; color:#e2e8f0 !important; }
+        html.ep-dark .m-notification .ep-config-btn{ background:transparent !important; border-color:rgba(148,163,184,0.25) !important; color:#94a3b8 !important; }
+        html.ep-dark .m-notification .ep-config-btn:hover{ background:rgba(148,163,184,0.14) !important; border-color:rgba(148,163,184,0.45) !important; color:#e2e8f0 !important; }
         /* Filas de urgencia: superficies e inputs en oscuro */
         .ep-dark #ep-urg-rows .ep-urg-row{ background:#101a2e !important; border-color:#1e2e4a !important; }
         .ep-dark #ep-urg-rows .ep-urg-name{ color:#f1f5f9 !important; }
@@ -1730,21 +2618,25 @@ function applyEpConfig(cfg){
         .ep-dark #ep-urg-rows .ep-urg-hex{ background:#0b1220 !important; border-color:#2a3f62 !important; color:#e2e8f0 !important; }
         .ep-dark #ep-urg-rows .ep-config-btn[aria-pressed="true"]{ background:#e2e8f0 !important; color:#0f172a !important; border-color:#e2e8f0 !important; }
         #ep-urg-rows .ep-config-btn[aria-pressed="true"]{ background:#0f172a; color:#fff; border-color:#0f172a; }
-        .ep-dark .ep-config-btn:hover{ background:#233656; border-color:#334155; color:#f1f5f9; }
+        .ep-dark .ep-config-btn:hover{ background:rgba(148,163,184,0.14); border-color:rgba(148,163,184,0.45); color:#f1f5f9; }
         .ep-config-widget{ flex:1; margin-top:12px; background:#fff; border-radius:16px; border:1px solid #e8ecf1; overflow:hidden; display:flex; flex-direction:column; max-height:80vh; contain:layout paint; box-shadow:0 8px 32px rgba(15,23,42,0.06),0 2px 8px rgba(15,23,42,0.04); }
         .ep-config-widget.ep-hidden{ display:none !important; }
-        .ep-right-stack .ep-config-widget.ep-hidden{ display:flex !important; }
+        .ep-right-stack .ep-config-widget.ep-hidden{ display:none !important; }
         .ep-config-header{ background:rgba(255,255,255,0.84); backdrop-filter:blur(12px) saturate(180%); padding:13px 16px; display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid rgba(226,232,240,0.8); position:sticky; top:0; z-index:2; }
         .ep-config-title{ font-size:14px; font-weight:700; letter-spacing:-0.015em; color:#0f172a; display:inline-flex; align-items:center; gap:8px; margin:0; }
         .ep-config-title::before{ content:''; width:8px; height:8px; border-radius:999px; background:var(--ep-accent); box-shadow:0 0 0 4px var(--ep-accent-ring); }
         .ep-config-body{ flex:1; overflow-y:auto; padding:0; background:#fff; }
         .ep-dark .ep-config-body{ background:#141e33 !important; background-color:#141e33 !important; }
-        .ep-config-tabs{ display:flex; gap:6px; padding:10px 12px; border-bottom:1px solid #f1f5f9; background:#fff; position:sticky; top:0; z-index:1; }
-        .ep-dark .ep-config-tabs{ background:#141e33; border-color:#1e2e4a; }
-        .ep-dark .ep-config-tab{ background:#1e2e4a !important; border-color:#2a3f62 !important; color:#cbd5e1 !important; }
-        .ep-dark .ep-config-tab:hover{ background:#233656 !important; border-color:#334155 !important; color:#f1f5f9 !important; }
-        .ep-config-tab{ flex:1; height:32px; border-radius:999px; border:1px solid #e2e8f0; background:#f8fafc; color:#475569; font-size:11px; font-weight:600; cursor:pointer; display:inline-flex; align-items:center; justify-content:center; gap:6px; transition:all 160ms ease; }
-        .ep-config-tab.active{ background:var(--ep-accent); color:#fff; border-color:var(--ep-accent); box-shadow:0 1px 3px var(--ep-accent-ring); }
+        .ep-config-tabs{ display:flex; gap:4px; padding:4px; margin:10px 12px 6px; background:#f1f5f9; border:1px solid #e2e8f0; border-radius:12px; position:sticky; top:0; z-index:1; box-shadow:0 1px 2px rgba(15,23,42,0.04) inset; }
+        .ep-config-tab{ flex:1 1 0; min-width:0; height:30px; padding:0 4px; border-radius:8px; border:1px solid transparent; background:transparent; color:#64748b; font-size:10.5px; font-weight:600; letter-spacing:-0.01em; cursor:pointer; display:inline-flex; align-items:center; justify-content:center; gap:4px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; transition:none; }
+        .ep-config-tab svg{ flex:none; }
+        .ep-config-tab:hover{ background:rgba(255,255,255,0.7); color:#334155; }
+        .ep-config-tab.active{ background:var(--ep-accent); color:#fff; border-color:var(--ep-accent); font-weight:700; box-shadow:0 1px 3px var(--ep-accent-ring); }
+        .ep-config-tab.active:hover{ background:var(--ep-accent); color:#fff; }
+        html.ep-dark .ep-widget-stack .ep-config-widget .ep-config-tabs, html.ep-dark .ep-config-widget .ep-config-tabs, html.ep-dark .ep-config-tabs{ background:#0b1220 !important; border-color:#1e2e4a !important; box-shadow:0 1px 2px rgba(0,0,0,0.3) inset !important; }
+        .ep-dark .ep-config-tab{ background:transparent !important; border-color:transparent !important; color:#94a3b8 !important; }
+        .ep-dark .ep-config-tab:hover{ background:rgba(255,255,255,0.06) !important; border-color:transparent !important; color:#e2e8f0 !important; }
+        .ep-dark .ep-config-tab.active{ background:color-mix(in srgb, var(--ep-accent) 60%, black) !important; border-color:transparent !important; color:#fff !important; }
         .ep-config-section{ display:none; padding:14px; }
         .ep-config-section.active{ display:block; }
         .ep-cfg-group{ background:#f8fafc; border:1px solid #f1f5f9; border-radius:12px; padding:12px; margin-bottom:10px; }
@@ -1771,6 +2663,16 @@ function applyEpConfig(cfg){
         .ep-dark .ep-custom-color input[type=color]{ border-color:#334155; background:#1e2e4a; }
         .ep-custom-color input[type=text]{ flex:1; height:32px; border-radius:8px; border:1px solid #e2e8f0; padding:0 10px; font-size:13px; font-family:monospace; background:#fff; color:#0f172a; }
         .ep-dark .ep-custom-color input[type=text]{ background:#1e2e4a; border-color:#334155; color:#e2e8f0; }
+        /* Fondo personalizado: filas con ritmo común (gap/altura/radio) y dark completo */
+        .ep-bg-actions-row{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+        .ep-bg-search-row{ display:flex; gap:6px; align-items:center; }
+        #ep-bg-thumb{ width:46px; height:34px; border-radius:8px; border:1px dashed #cbd5e1; background-size:cover; background-position:center; flex-shrink:0; }
+        .ep-dark #ep-bg-thumb{ border-color:#334155; background-color:#101a2e; }
+        .ep-bg-search-inp{ flex:1; min-width:0; height:30px; padding:0 10px; border-radius:8px; border:1px solid #e2e8f0; background:#fff; color:#0f172a; font-size:12px; outline:none; transition:border-color 160ms ease, box-shadow 160ms ease; }
+        .ep-bg-search-inp::placeholder{ color:#94a3b8; opacity:1; }
+        .ep-bg-search-inp:focus{ border-color:var(--ep-accent); box-shadow:0 0 0 3px var(--ep-accent-ring); }
+        .ep-dark .ep-bg-search-inp{ background:#1e2e4a; border-color:#334155; color:#e2e8f0; }
+        .ep-dark .ep-bg-search-inp::placeholder{ color:#64748b; opacity:1; }
         .ep-side-grid{ display:grid; grid-template-columns:1fr 1fr; gap:8px; }
         .ep-side-opt{ padding:12px; border-radius:12px; border:1.5px solid #e2e8f0; background:#fff; cursor:pointer; text-align:center; transition:all 160ms ease; }
         .ep-side-opt:hover{ border-color:#cbd5e1; background:#f8fafc; }
@@ -1814,12 +2716,11 @@ function applyEpConfig(cfg){
         .ep-suggest-err{ background:#fee2e2; border:1px solid #fecaca; color:#991b1b; padding:10px 12px; border-radius:10px; font-size:12px; text-align:center; }
         .acts-list::-webkit-scrollbar, .ep-config-body::-webkit-scrollbar{ width:5px; }
         .acts-list::-webkit-scrollbar-thumb, .ep-config-body::-webkit-scrollbar-thumb{ background:#d1d5db; border-radius:5px; }
-        .ep-right-stack .ep-config-widget.ep-hidden{ display:flex !important; }
-        .ep-right-stack .ep-config-widget{ margin-left:0 !important; margin-top:0 !important; flex:none !important; width:100% !important; will-change:transform,opacity,filter; backface-visibility:hidden; transform:translateZ(0); transition: opacity 300ms var(--ep-ease-out), transform 340ms var(--ep-ease-spring), filter 340ms var(--ep-ease-spring); }
-        .ep-right-stack.ep-state-config .ep-config-widget{ opacity:1 !important; transform:translateY(0) scale(1) translateZ(0) !important; filter:blur(0) saturate(1) !important; visibility:visible !important; pointer-events:auto !important; position:relative !important; transition-delay:40ms; }
-        .ep-right-stack.ep-state-config .dues-container, .ep-right-stack.ep-state-config .ep-schedule-widget, .ep-right-stack.ep-state-config .ep-mail-widget, .ep-right-stack.ep-state-config .ep-miuv-widget{ opacity:0 !important; transform:translateY(10px) scale(0.96) translateZ(0) !important; filter:blur(6px) saturate(1.05) !important; visibility:hidden !important; pointer-events:none !important; position:absolute !important; }
-        .ep-right-stack.ep-state-tasks .ep-config-widget, .ep-right-stack.ep-state-schedule .ep-config-widget, .ep-right-stack.ep-state-mail .ep-config-widget, .ep-right-stack.ep-state-miuv .ep-config-widget{ opacity:0 !important; transform:translateY(10px) scale(0.96) translateZ(0) !important; filter:blur(6px) saturate(1.05) !important; visibility:hidden !important; pointer-events:none !important; position:absolute !important; }
-        @starting-style{ .ep-right-stack .ep-config-widget{ opacity:0; transform:translateY(10px) scale(0.96); filter:blur(6px) saturate(1.1); } }
+        .ep-right-stack .ep-config-widget.ep-hidden{ display:none !important; }
+        .ep-right-stack .ep-config-widget{ margin-left:0 !important; margin-top:0 !important; flex:none !important; width:100% !important; backface-visibility:hidden; transform:translateZ(0); transition:none; }
+        .ep-right-stack.ep-state-config .ep-config-widget{ opacity:1 !important; visibility:visible !important; pointer-events:auto !important; position:relative !important; }
+        .ep-right-stack.ep-state-config .dues-container, .ep-right-stack.ep-state-config .ep-schedule-widget, .ep-right-stack.ep-state-config .ep-mail-widget, .ep-right-stack.ep-state-config .ep-miuv-widget{ visibility:hidden !important; pointer-events:none !important; position:absolute !important; }
+        .ep-right-stack.ep-state-tasks .ep-config-widget, .ep-right-stack.ep-state-schedule .ep-config-widget, .ep-right-stack.ep-state-mail .ep-config-widget, .ep-right-stack.ep-state-miuv .ep-config-widget{ visibility:hidden !important; pointer-events:none !important; position:absolute !important; }
         /* DARK: página Mis cursos — buscador, filtros y tarjetas (ratios AA medidos) */
         .ep-dark .SEARCH_BAR_BOX .input-group-append.bg-white{ background:#141e33 !important; border-color:#2a3f62 !important; }
         .ep-dark input.SEARCH_BAR{ background:#1e2e4a !important; border-color:#2a3f62 !important; color:#e2e8f0 !important; }
@@ -2355,27 +3256,32 @@ function applyEpConfig(cfg){
         .ep-dark .act-item.urgent .footer-row-spec .urgency-pill-spec:hover{ filter:brightness(1.08) !important; }
         .ep-dark .act-item.warning .footer-row-spec .urgency-pill-spec{ background:var(--ep-urg-warning, #f59e0b) !important; border-color:var(--ep-urg-warning-dark, #b45309) !important; color:var(--ep-urg-warning-tx, #451a03) !important; text-shadow:var(--ep-urg-warning-sh, none) !important; box-shadow:0 2px calc(var(--ep-urg-warning-glow-n, 0.55)*26px) var(--ep-urg-warning-glow, transparent) !important; }
         .ep-dark .act-item.warning .footer-row-spec .urgency-pill-spec:hover{ filter:brightness(1.06) !important; }
-        .ep-dark .act-item.safe .footer-row-spec .urgency-pill-spec{ background:var(--ep-urg-safe, #0ea5e9) !important; border-color:var(--ep-urg-safe-dark, #0284c7) !important; color:#ffffff !important; text-shadow:0 1px 2px rgba(0,0,0,0.45) !important; box-shadow:0 2px calc(var(--ep-urg-safe-glow-n, 0.55)*26px) var(--ep-urg-safe-glow, transparent) !important; }
+        .ep-dark .act-item.safe .footer-row-spec .urgency-pill-spec{ background:var(--ep-urg-safe, #0ea5e9) !important; border-color:var(--ep-urg-safe-dark, #0284c7) !important; color:var(--ep-urg-safe-tx, #082f49) !important; text-shadow:var(--ep-urg-safe-sh, none) !important; box-shadow:0 2px calc(var(--ep-urg-safe-glow-n, 0.55)*26px) var(--ep-urg-safe-glow, transparent) !important; }
         .ep-dark .act-item.safe .footer-row-spec .urgency-pill-spec:hover{ filter:brightness(1.06) !important; }
         .ep-dark .act-item .footer-row-spec .urgency-pill-spec.is-read .pill-dot{ box-shadow:0 0 0 3px rgba(148,163,184,0.25) !important; }
-        /* CTA primario conserva acento en oscuro (mismo lenguaje que claro, texto on-accent AA) — gana a #ep-force-white por especificidad */
-        .ep-dark .act-item .btn-solid-spec.view-activity-btn{ background:var(--ep-accent) !important; border-color:var(--ep-accent) !important; color:#ffffff !important; box-shadow:0 2px 8px color-mix(in srgb, var(--ep-accent) 35%, transparent) !important; }
-        .ep-dark .act-item .btn-solid-spec.view-activity-btn:hover{ background:var(--ep-accent) !important; border-color:var(--ep-accent) !important; color:#ffffff !important; filter:brightness(1.1) !important; transform:translateY(-1px) translateZ(0) !important; box-shadow:0 4px 12px rgba(0,0,0,0.4) !important; }
-        .ep-dark .act-item .btn-solid-spec.view-activity-btn:hover .btn-label{ color:#ffffff !important; }
-        .ep-dark .act-item .btn-solid-spec.view-activity-btn .btn-chevron{ background:rgba(255,255,255,0.18) !important; border-color:transparent !important; color:#ffffff !important; }
-        .ep-dark .act-item .btn-solid-spec.view-activity-btn:hover .btn-chevron{ background:rgba(255,255,255,0.24) !important; border-color:transparent !important; color:#ffffff !important; transform:translateX(1.5px) translateZ(0) !important; }
-        .ep-dark .act-item .btn-solid-spec.view-activity-btn .ai-icon-box-spec{ background:color-mix(in srgb, var(--ep-on-accent, #fff) 14%, transparent) !important; border-color:transparent !important; color:inherit !important; }
+        /* CTA primario conserva acento en oscuro (mismo lenguaje que claro, texto on-accent AA) — gana a #ep-force-white por especificidad.
+           FIX D1: el blanco literal daba 2.43:1 sobre acentos claros (cyan #06b6d4); var(--ep-on-accent)
+           calcula #0f172a (8.2:1) o #fff (≥4.5:1) según el acento configurado. */
+        /* FIX oscuridad: el par acento/on-accent falla con acentos claros (on-accent=#0f172a →
+           letras negras en hover). En oscuro el botón usa chip oscuro con texto claro,
+           independiente del acento — mismo lenguaje que el contador de pestañas. */
+        .ep-dark .act-item .btn-solid-spec.view-activity-btn{ background:#1e2e4a !important; border-color:#2a3f62 !important; color:#e2e8f0 !important; box-shadow:0 2px 8px rgba(0,0,0,0.35) !important; }
+        .ep-dark .act-item .btn-solid-spec.view-activity-btn:hover{ background:#233656 !important; border-color:#334155 !important; color:#f1f5f9 !important; transform:translateY(-1px) translateZ(0) !important; box-shadow:0 4px 12px rgba(0,0,0,0.4) !important; }
+        .ep-dark .act-item .btn-solid-spec.view-activity-btn:hover .btn-label{ color:#f1f5f9 !important; }
+        .ep-dark .act-item .btn-solid-spec.view-activity-btn .btn-chevron{ background:rgba(226,232,240,0.14) !important; border-color:transparent !important; color:#e2e8f0 !important; }
+        .ep-dark .act-item .btn-solid-spec.view-activity-btn:hover .btn-chevron{ background:rgba(226,232,240,0.24) !important; border-color:transparent !important; color:#f1f5f9 !important; transform:translateX(1.5px) translateZ(0) !important; }
+        .ep-dark .act-item .btn-solid-spec.view-activity-btn .ai-icon-box-spec{ background:rgba(226,232,240,0.12) !important; border-color:transparent !important; color:inherit !important; }
         .ep-dark .act-item .btn-solid-spec.view-activity-btn:focus-visible{ outline:2px solid var(--ep-accent-ring) !important; outline-offset:2px !important; }
-        /* CTA secundario de correo: mismo acento que en claro (ambos son .view-activity-btn) */
-        .ep-dark .ep-mail-item .btn-solid-spec.view-activity-btn{ background:var(--ep-accent) !important; border-color:var(--ep-accent) !important; color:#ffffff !important; box-shadow:0 2px 8px color-mix(in srgb, var(--ep-accent) 35%, transparent) !important; }
-        .ep-dark .ep-mail-item .btn-solid-spec.view-activity-btn:hover{ background:var(--ep-accent) !important; border-color:var(--ep-accent) !important; color:#ffffff !important; filter:brightness(1.1) !important; transform:translateY(-1px) translateZ(0) !important; box-shadow:0 4px 12px rgba(0,0,0,0.4) !important; }
-        .ep-dark .ep-mail-item .btn-solid-spec.view-activity-btn:hover .btn-label{ color:#ffffff !important; }
-        .ep-dark .ep-mail-item .btn-solid-spec.view-activity-btn:hover .btn-chevron{ background:color-mix(in srgb, var(--ep-on-accent, #fff) 24%, transparent) !important; border-color:transparent !important; color:inherit !important; }
-        .ep-dark .ep-mail-item .btn-solid-spec.view-activity-btn .btn-chevron{ background:color-mix(in srgb, var(--ep-on-accent, #fff) 18%, transparent) !important; border-color:transparent !important; color:inherit !important; }
+        /* CTA secundario de correo: mismo chip oscuro que en tarjetas */
+        .ep-dark .ep-mail-item .btn-solid-spec.view-activity-btn{ background:#1e2e4a !important; border-color:#2a3f62 !important; color:#e2e8f0 !important; box-shadow:0 2px 8px rgba(0,0,0,0.35) !important; }
+        .ep-dark .ep-mail-item .btn-solid-spec.view-activity-btn:hover{ background:#233656 !important; border-color:#334155 !important; color:#f1f5f9 !important; transform:translateY(-1px) translateZ(0) !important; box-shadow:0 4px 12px rgba(0,0,0,0.4) !important; }
+        .ep-dark .ep-mail-item .btn-solid-spec.view-activity-btn:hover .btn-label{ color:#f1f5f9 !important; }
+        .ep-dark .ep-mail-item .btn-solid-spec.view-activity-btn:hover .btn-chevron{ background:rgba(226,232,240,0.24) !important; border-color:transparent !important; color:inherit !important; }
+        .ep-dark .ep-mail-item .btn-solid-spec.view-activity-btn .btn-chevron{ background:rgba(226,232,240,0.14) !important; border-color:transparent !important; color:inherit !important; }
         .ep-dark .ep-mail-item .btn-solid-spec.view-activity-btn:focus-visible{ outline:2px solid var(--ep-accent-ring) !important; outline-offset:2px !important; }
         .ep-dark .btn-solid-spec.is-loading::after{ border-color:#2a3f62 !important; border-top-color:var(--ep-accent) !important; }
-        .ep-dark .view-activity-btn:not(.btn-solid-spec), .ep-dark .view-exam-btn, .ep-dark .view-forum-btn{ background:#1e2e4a !important; border-color:#2a3f62 !important; color:#e2e8f0 !important; }
-        .ep-dark .view-activity-btn:not(.btn-solid-spec):hover, .ep-dark .view-exam-btn:hover, .ep-dark .view-forum-btn:hover{ background:#233656 !important; border-color:#334155 !important; color:#f1f5f9 !important; }
+        .ep-dark .view-activity-btn:not(.btn-solid-spec), .ep-dark .view-exam-btn:not(.btn-solid-spec), .ep-dark .view-forum-btn:not(.btn-solid-spec){ background:#1e2e4a !important; border-color:#2a3f62 !important; color:#e2e8f0 !important; }
+        .ep-dark .view-activity-btn:not(.btn-solid-spec):hover, .ep-dark .view-exam-btn:not(.btn-solid-spec):hover, .ep-dark .view-forum-btn:not(.btn-solid-spec):hover{ background:#233656 !important; border-color:#334155 !important; color:#f1f5f9 !important; }
         .ep-dark .view-activity-btn:focus-visible{ outline:2px solid var(--ep-accent-ring) !important; }
         /* —— C. Horario —— */
         .ep-dark .ep-schedule-tabs{ background:#0b1220 !important; border-color:#1e2e4a !important; box-shadow:0 1px 2px rgba(0,0,0,0.3) inset !important; }
@@ -2386,9 +3292,9 @@ function applyEpConfig(cfg){
         .ep-dark .ep-schedule-tab.active:hover{ background:var(--ep-accent) !important; background-color:var(--ep-accent) !important; background:color-mix(in srgb, var(--ep-accent) 60%, black) !important; background-color:color-mix(in srgb, var(--ep-accent) 60%, black) !important; filter:brightness(1.1) !important; }
         .ep-dark .ep-grades-period-select:focus{ border-color:var(--ep-accent-ring) !important; box-shadow:0 0 0 3px var(--ep-accent-ring) !important; }
         .ep-dark .ep-schedule-tab.is-today{ background:var(--ep-accent-soft) !important; border-color:var(--ep-accent-ring) !important; color:color-mix(in srgb, var(--ep-accent) 62%, #ffffff) !important; }
-        .ep-dark .ep-schedule-tab.active.is-today{ background:#e2e8f0 !important; border-color:#e2e8f0 !important; color:#0f172a !important; }
+        .ep-dark .ep-schedule-tab.active.is-today{ background:color-mix(in srgb, var(--ep-accent) 60%, black) !important; border-color:transparent !important; color:#ffffff !important; box-shadow:0 1px 3px rgba(0,0,0,0.4) !important; }
         .ep-dark .ep-tab-count{ background:#1e2e4a !important; color:#cbd5e1 !important; }
-        .ep-dark .ep-schedule-tab.active .ep-tab-count{ background:var(--ep-accent) !important; color:var(--ep-on-accent, #fff) !important; }
+        .ep-dark .ep-schedule-tab.active .ep-tab-count{ background:var(--ep-accent) !important; color:var(--ep-on-accent, #fff) !important; border-color:rgba(255,255,255,0.45) !important; box-shadow:0 0 0 3px var(--ep-accent-soft, rgba(255,255,255,0.10)) !important; }
         .ep-dark .ep-schedule-widget .ep-schedule-card{ background:#1a2742 !important; border-color:#2a3f62 !important; box-shadow:0 1px 2px rgba(0,0,0,0.3) !important; }
         .ep-dark .ep-schedule-widget .ep-schedule-card:hover{ border-color:#334155 !important; box-shadow:0 6px 20px rgba(0,0,0,0.4) !important; }
         .ep-dark .ep-schedule-widget .ep-schedule-card.is-next{ background:linear-gradient(135deg, var(--ep-accent-soft), #1a2742) !important; border-color:var(--ep-accent-ring) !important; }
@@ -2460,12 +3366,17 @@ function applyEpConfig(cfg){
         .ep-dark .ep-mail-item .card-body-spec{ background:transparent !important; }
         .ep-dark .ep-mail-item .footer-row-spec{ background:#101a2e !important; border-color:#1e2e4a !important; }
         .ep-dark .ep-mail-item .footer-row-spec .urgency-pill-spec{ background:#1e2e4a !important; border-color:#2a3f62 !important; color:#cbd5e1 !important; }
-        .ep-dark .ep-mail-item .footer-row-spec .urgency-pill-spec.is-read{ background:linear-gradient(#1e2e4a,#1e2e4a) padding-box, linear-gradient(135deg, #2a3f62 0%, #334155 100%) border-box !important; border:1px solid transparent !important; color:#94a3b8 !important; }
-        .ep-dark .ep-mail-item .footer-row-spec .urgency-pill-spec.is-read:hover{ background:linear-gradient(#233656,#233656) padding-box, linear-gradient(135deg, #2a3f62 0%, #334155 100%) border-box !important; border:1px solid transparent !important; color:#cbd5e1 !important; transform:none !important; box-shadow:none !important; }
-        .ep-dark .ep-mail-item .footer-row-spec .urgency-pill-spec.is-read svg{ color:#94a3b8 !important; }
-        .ep-dark .ep-mail-item .footer-row-spec .urgency-pill-spec.is-read:hover svg{ color:#cbd5e1 !important; }
+        /* FIX contraste oscuro: píldora Leído con borde visible (pizarra clara) + texto más legible */
+        .ep-dark .ep-mail-item .footer-row-spec .urgency-pill-spec.is-read{ background:linear-gradient(#1e2e4a,#1e2e4a) padding-box, linear-gradient(135deg, #46628a 0%, #64748b 100%) border-box !important; border:1px solid transparent !important; color:#cbd5e1 !important; }
+        .ep-dark .ep-mail-item .footer-row-spec .urgency-pill-spec.is-read:hover{ background:linear-gradient(#233656,#233656) padding-box, linear-gradient(135deg, #46628a 0%, #64748b 100%) border-box !important; border:1px solid transparent !important; color:#e2e8f0 !important; transform:none !important; box-shadow:0 0 0 3px rgba(148,163,184,0.12) !important; }
+        .ep-dark .ep-mail-item .footer-row-spec .urgency-pill-spec.is-read svg{ color:#cbd5e1 !important; }
+        .ep-dark .ep-mail-item .footer-row-spec .urgency-pill-spec.is-read:hover svg{ color:#e2e8f0 !important; }
+        /* FIX: píldora Leído en tarjetas de tarea — sin regla oscura caía a la clara (blanca sobre tarjeta oscura) */
+        .ep-dark .act-item .footer-row-spec .urgency-pill-spec.is-read{ background:linear-gradient(#1e2e4a,#1e2e4a) padding-box, linear-gradient(135deg, #46628a 0%, #64748b 100%) border-box !important; border:1px solid transparent !important; color:#cbd5e1 !important; }
+        .ep-dark .act-item .footer-row-spec .urgency-pill-spec.is-read:hover{ background:linear-gradient(#233656,#233656) padding-box, linear-gradient(135deg, #46628a 0%, #64748b 100%) border-box !important; border:1px solid transparent !important; color:#e2e8f0 !important; transform:none !important; box-shadow:0 0 0 3px rgba(148,163,184,0.12) !important; }
+        .ep-dark .act-item .footer-row-spec .urgency-pill-spec.is-read svg{ color:#cbd5e1 !important; }
         /* FIX cascada: el override de acento usa html (0,5,1) -> aqui html.ep-dark (0,6,1) para no perder */
-        .ep-dark .ep-mail-item .footer-row-spec .urgency-pill-spec.is-unread, html.ep-dark .ep-mail-item .footer-row-spec .urgency-pill-spec.is-unread, html.ep-dark .act-item .footer-row-spec .urgency-pill-spec.is-unread{ background:linear-gradient(#1a2742,#1a2742) padding-box, linear-gradient(135deg, var(--ep-accent-ring) 0%, var(--ep-accent) 100%) border-box !important; border:1px solid transparent !important; color:color-mix(in srgb, var(--ep-accent) 62%, #ffffff) !important; }
+        .ep-dark .ep-mail-item .footer-row-spec .urgency-pill-spec.is-unread, html.ep-dark .ep-mail-item .footer-row-spec .urgency-pill-spec.is-unread, html.ep-dark .act-item .footer-row-spec .urgency-pill-spec.is-unread{ background:linear-gradient(#1a2742,#1a2742) padding-box, linear-gradient(135deg, color-mix(in srgb, var(--ep-accent) 55%, transparent) 0%, var(--ep-accent) 100%) border-box !important; border:1px solid transparent !important; color:color-mix(in srgb, var(--ep-accent) 62%, #ffffff) !important; box-shadow:0 0 0 2px var(--ep-accent-soft) !important; }
         .ep-dark .ep-mail-item .footer-row-spec .urgency-pill-spec.is-unread:hover, html.ep-dark .ep-mail-item .footer-row-spec .urgency-pill-spec.is-unread:hover, html.ep-dark .act-item .footer-row-spec .urgency-pill-spec.is-unread:hover{ background:linear-gradient(#1e2e4a,#1e2e4a) padding-box, linear-gradient(135deg, var(--ep-accent-ring) 0%, var(--ep-accent) 100%) border-box !important; border:1px solid transparent !important; color:color-mix(in srgb, var(--ep-accent) 62%, #ffffff) !important; transform:none !important; box-shadow:0 0 0 3px var(--ep-accent-soft) !important; }
         .ep-dark .ep-mail-item .footer-row-spec .urgency-pill-spec.is-unread svg, html.ep-dark .ep-mail-item .footer-row-spec .urgency-pill-spec.is-unread svg, html.ep-dark .act-item .footer-row-spec .urgency-pill-spec.is-unread svg{ color:color-mix(in srgb, var(--ep-accent) 62%, #ffffff) !important; }
         .ep-dark .ep-mail-item .footer-row-spec .urgency-pill-spec.is-unread .pill-dot, html.ep-dark .ep-mail-item .footer-row-spec .urgency-pill-spec.is-unread .pill-dot{ box-shadow:0 0 0 3px var(--ep-accent-ring) !important; }
@@ -2622,6 +3533,40 @@ function applyEpConfig(cfg){
         @media (prefers-contrast: more) {
           .ep-dark .act-item, .ep-dark .ep-schedule-card, .ep-dark .ep-mail-item, .ep-dark .ep-miuv-grade-card, .ep-dark .ep-miuv-area-card, .ep-dark .ep-miuv-exam-card{ border-color:#475569 !important; }
         }
+        /* FIX U5/U6: los discos de icono de las píldoras del footer (is-read / is-unread) nacen con
+           fondo claro en getStylesFull (#f1f5f9 y color-mix con #fff) + borde #e2e8f0 — en oscuro leen
+           como "fondo blanco" y "borde blanco" dentro de las tarjetas de correo. Escudo tardío (última
+           hoja, especificidad >= (1,4,1)): solo html.ep-dark; disco sobre la superficie oscura de la
+           tarjeta, borde con el token oscuro, color de icono ya cubierto por las reglas is-read/is-unread
+           de arriba (#94a3b8 / mezcla de acento). El tema claro no se toca. */
+        html.ep-dark .act-item .footer-row-spec .urgency-pill-spec.is-read svg, html.ep-dark .ep-mail-item .footer-row-spec .urgency-pill-spec.is-read svg{ background:rgba(148,163,184,0.18) !important; border:1px solid rgba(148,163,184,0.45) !important; }
+        html.ep-dark .act-item .footer-row-spec .urgency-pill-spec.is-read:hover svg, html.ep-dark .ep-mail-item .footer-row-spec .urgency-pill-spec.is-read:hover svg{ background:rgba(148,163,184,0.28) !important; border-color:rgba(148,163,184,0.6) !important; }
+        html.ep-dark .act-item .footer-row-spec .urgency-pill-spec.is-unread svg, html.ep-dark .ep-mail-item .footer-row-spec .urgency-pill-spec.is-unread svg{ background:color-mix(in srgb, var(--ep-accent) 16%, #141e33) !important; border:1px solid color-mix(in srgb, var(--ep-accent) 55%, transparent) !important; }
+        /* ===== AUDITORÍA OSCURO DE TEXTOS: reglas claras sin variante dark — texto #0f172a/#111827/
+           #1e293b/#000/#334155 sobre superficies que SÍ se pintan oscuras (títulos de widget,
+           act-items, área IA, correo, vacíos). Menús dropdown y píldoras/tarjetas blancas NO se
+           tocan (siguen claras y sus textos oscuros son legibles). Barridos inline acotados para
+           no romper colores a propósito (acentos, estados). ===== */
+        html.ep-dark .ep-schedule-widget-title, html.ep-dark .ep-mail-widget-title, html.ep-dark .ep-miuv-widget-title, html.ep-dark .container-header .header-title{ color:#e2e8f0 !important; }
+        html.ep-dark .activity-title{ color:#e2e8f0; }
+        html.ep-dark .act-item .title-spec{ color:#e2e8f0; }
+        html.ep-dark .ep-mail-item:not(.unread) .title-spec{ color:#e2e8f0 !important; }
+        html.ep-dark .ep-mail-detail-subject{ color:#e2e8f0 !important; }
+        html.ep-dark .ep-mail-widget [style*="font-weight:600;color:#111827"]{ color:#e2e8f0 !important; }
+        html.ep-dark .ep-mail-widget [style*="font-weight:600;color:#334155"]{ color:#cbd5e1 !important; }
+        html.ep-dark .ep-mail-widget [style*="border-radius:8px;color:#0f172a"]{ background:#1e2e4a !important; border-color:#2a3f62 !important; color:#e2e8f0 !important; }
+        html.ep-dark .ep-miuv-widget [style*="color:#334155"]{ color:#cbd5e1 !important; }
+        html.ep-dark .no-activities, html.ep-dark .no-visible-tasks{ background:rgba(20,30,51,0.72) !important; border-color:rgba(42,63,98,0.6) !important; color:#e2e8f0 !important; box-shadow:0 8px 24px rgba(0,0,0,0.35) !important; }
+        html.ep-dark .no-activities-title{ color:#e2e8f0 !important; }
+        html.ep-dark .act-item .ai-title-spec, html.ep-dark .act-item .ai-response-spec h4, html.ep-dark .act-item .ai-response-spec strong{ color:#e2e8f0 !important; }
+        html.ep-dark .act-item .ai-response-spec em{ color:#cbd5e1 !important; background:#1e2e4a !important; }
+        html.ep-dark .act-item .ai-response-spec code{ color:#e2e8f0 !important; background:#1e2e4a !important; border-color:#2a3f62 !important; }
+        html.ep-dark .act-item .chip-btn-spec{ background:#1e2e4a !important; border-color:#2a3f62 !important; color:#cbd5e1 !important; }
+        html.ep-dark .act-item .ai-response-spec [style*="color:#0f172a"], html.ep-dark .act-item .ai-response-spec [style*="color:#111827"], html.ep-dark .act-item .ai-response-spec [style*="color:#1e293b"], html.ep-dark .act-item .ai-response-spec [style*="color:#334155"], html.ep-dark .act-item .ai-response-spec [style*="color:#000000"]{ color:#e2e8f0 !important; }
+        html.ep-dark .act-item .ask-row-spec:focus-within{ border-color:#334155 !important; box-shadow:0 0 0 3px rgba(148,163,184,0.12), 0 4px 12px rgba(0,0,0,0.3) !important; }
+        html.ep-dark .act-item .ask-input-spec{ color:#e2e8f0 !important; }
+        html.ep-dark .dues-container .ep-tasks-tab:hover{ background:rgba(255,255,255,0.06) !important; color:#e2e8f0 !important; }
+        html.ep-dark .ep-miuv-tab:hover{ background:rgba(255,255,255,0.06) !important; color:#e2e8f0 !important; }
       `;
       document.head.appendChild(s);
     }
@@ -3435,6 +4380,41 @@ function navigateToActivity(courseId, activityId) {
   return navigationConfig;
 }
 
+// ===== Enlace de notificaciones (botón "Abrir tarea") =====
+// 1) Pestaña viva: el SW manda epnOpenTask → misma navegación que el botón Ver actividad.
+// 2) Pestaña nueva: /activity/delivery?epnCourse=..&epnAct=.. → el content script (document_start,
+//    antes de que Angular lea el config) escribe el mismo layoutConfigNavegación y limpia la URL.
+(function __ep_epnLink(){
+  try {
+    const q = new URLSearchParams(location.search);
+    const c = q.get('epnCourse'), a = q.get('epnAct');
+    if (c && a) {
+      localStorage.setItem('layoutConfigNavegation', JSON.stringify({
+        config: { demo: 'default', navegation: {
+          course: { id: Number(c) || c, permission: 2, unit: 0, activity: Number(a) || a, forum: 0, exam: 0, view_student: false, type: 1 },
+          forum: { comment: 0 },
+          member: { user: '' },
+          tracing: { user: '' },
+          exam: { id: '', ending: '' }
+        } }
+      }));
+      localStorage.setItem('courseId', String(c));
+      localStorage.setItem('changeActivityId', String(a));
+      try { history.replaceState({}, '', location.pathname); } catch {}
+    }
+  } catch {}
+  try {
+    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage && !window.__ep_epnLinkBound) {
+      window.__ep_epnLinkBound = true;
+      chrome.runtime.onMessage.addListener((msg) => {
+        try {
+          if (msg && msg.action === 'epnOpenTask' && msg.courseId != null && msg.activityId != null && typeof navigateToActivity === 'function') navigateToActivity(msg.courseId, msg.activityId);
+        } catch {}
+      });
+    }
+  } catch {}
+})();
+
 /**
  * Navigates to a specific exam in Eminus
  */
@@ -3650,12 +4630,9 @@ function getStylesFull() {
       z-index: 9998;
     }
     .dues-container.ep-hidden { display: none !important; }
-    /* Apple: dentro del stack, ep-hidden no usa display:none para permitir spring interrumpible */
-    .ep-right-stack .dues-container.ep-hidden,
-    .ep-right-stack .ep-schedule-widget.ep-hidden,
-    .ep-right-stack .ep-mail-widget.ep-hidden {
-      display: block !important;
-    }
+    /* FIX slot: dentro del stack .ep-hidden TAMBIEN es display:none (con inline display:none
+       al terminar la salida). La regla vieja display:block !important mantenia el slot del
+       widget cerrado — era el hueco que el usuario reportaba. */
     .ep-wrapper.ep-collapsed .d-flex.flex-column.align-items-center.mt-3 {
       flex: 1;
       max-width: 100%;
@@ -3769,12 +4746,35 @@ function getStylesFull() {
       line-height: 1.4;
     }
 
+    .content-body.ep-skeleton-layer {
+      position: relative !important;
+      min-height: 96px !important;
+    }
+
     .skeleton-cards {
+      position: relative !important;
+      z-index: 3 !important;
       width: 100%;
       display: flex;
       flex-direction: column;
       gap: 10px;
       padding: 0 2px;
+      margin-top: 10px !important;
+      opacity: 1;
+      visibility: visible;
+      pointer-events: none !important;
+      transition: opacity 150ms ease, visibility 150ms ease;
+    }
+
+    /* The JS toggles this class once the real content is in place. Without a
+       rule for it the skeleton stayed on screen on top of the list. */
+    .skeleton-cards.ep-skeleton-hidden {
+      opacity: 0 !important;
+      visibility: hidden !important;
+      position: absolute !important;
+      top: 0 !important;
+      left: 0 !important;
+      right: 0 !important;
     }
 
     .skeleton-card {
@@ -3881,7 +4881,9 @@ function getStylesFull() {
       overflow: hidden;
       contain: layout paint;
       transition: transform 200ms var(--ep-ease-spring, cubic-bezier(0.16,1,0.3,1)), box-shadow 200ms ease !important;
-      will-change: transform, box-shadow;
+      /* plan 678879b6 F2: will-change retirado del estado estable (lo aporta
+         .ep-anim durante enter/exit); el hint siempre-encendido retenia una
+         capa compuesta del widget de tareas en reposo. */
     }
     .dues-container:hover {
       transform: translateY(-1px) translateZ(0) !important;
@@ -3927,13 +4929,8 @@ function getStylesFull() {
         min-width: 368px !important;
       }
     }
-    /* Apple: dentro del stack, nunca display:none — permite fade interrumpible */
-    .ep-right-stack .ep-schedule-widget.ep-hidden,
-    .ep-right-stack .ep-mail-widget.ep-hidden,
-    .ep-right-stack .ep-miuv-widget.ep-hidden {
-      display: flex !important;
-      /* flex mantiene layout pero invisible via opacity/visibility/position del estado */
-    }
+    /* FIX slot: dentro del stack .ep-hidden TAMBIEN es display:none — la regla vieja
+       display:flex !important mantenia el slot (height) del widget cerrado. */
     .ep-schedule-widget-header {
       background: rgba(255,255,255,0.84) !important;
       backdrop-filter: blur(12px) saturate(180%) !important;
@@ -4563,7 +5560,10 @@ function getStylesFull() {
       contain: layout style paint;
       font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
       font-optical-sizing: auto;
-      will-change: transform, opacity;
+      /* plan 678879b6 F2: will-change SOLO mientras anima (lo aporta .ep-anim).
+         El hint siempre-encendido retenia una textura compuesta de TODO el
+         stack (contenido de mail incluido) en reposo y la re-rasterizaba en
+         cada animacion del resto de widgets. */
       align-self: flex-start;
       position: sticky;
       top: 12px;
@@ -4591,146 +5591,90 @@ function getStylesFull() {
       flex: none !important;
       width: 100% !important;
       /* Apple §11: solo transform/opacity/filter — GPU, nunca width/height */
-      will-change: transform, opacity, filter;
+      /* plan 678879b6 F2: will-change retirado del estado estable; la regla
+         .ep-anim (fluid-animations) lo aplica SOLO durante enter/exit, asi la
+         textura compuesta del widget (mail puede ser enorme) no sobrevive al
+         settle y no degrada las animaciones de los widgets siguientes. */
       backface-visibility: hidden;
       transform: translateZ(0);
-      /* Materialize: blur+scale juntos, no solo fade (§12) */
-      transition:
-        opacity 300ms var(--ep-ease-out),
-        transform 340ms var(--ep-ease-spring),
-        filter 340ms var(--ep-ease-spring);
+      /* FIX CAUSE 1: sin transition aqui. Esta transition (300-340ms) animaba
+         opacity/transform/filter cuando el stack cambiaba ep-state-* — EN PARALELO
+         con la animacion fluid (.animate-fluid-* via .ep-anim) = doble movimiento.
+         El sistema fluid es el unico dueño del movimiento; el estado es instantaneo. */
+      transition: none;
     }
-    @starting-style {
-      .ep-right-stack .dues-container,
-      .ep-right-stack .ep-schedule-widget,
-      .ep-right-stack .ep-mail-widget,
-      .ep-right-stack .ep-miuv-widget,
-      .ep-right-stack .ep-config-widget {
-        opacity: 0;
-        transform: translateY(10px) scale(0.96);
-        filter: blur(6px) saturate(1.1);
-      }
-    }
-    /* Apple §7: symmetric paths — translateY(10px) scale(0.96) ↔ 0/1, blur 6→0 */
+    /* Apple §7: FIX CAUSE 1 — reglas de estado = SOLO ESTADO (visibility/pointer-events/
+       position/opacity final). Sin transform/filter/transition: el movimiento lo hace
+       exclusivamente el sistema fluid (.animate-fluid-* + .ep-anim). */
     .ep-right-stack.ep-state-tasks .dues-container {
       opacity: 1 !important;
-      transform: translateY(0) scale(1) translateZ(0) !important;
-      filter: blur(0) saturate(1) !important;
       visibility: visible !important;
       pointer-events: auto !important;
       position: relative !important;
-      transition-delay: 40ms;
     }
     .ep-right-stack.ep-state-tasks .ep-schedule-widget,
     .ep-right-stack.ep-state-tasks .ep-mail-widget,
     .ep-right-stack.ep-state-tasks .ep-miuv-widget,
     .ep-right-stack.ep-state-tasks .ep-config-widget {
-      opacity: 0 !important;
-      transform: translateY(10px) scale(0.96) translateZ(0) !important;
-      filter: blur(6px) saturate(1.05) !important;
       visibility: hidden !important;
       pointer-events: none !important;
       position: absolute !important;
-      transition:
-        opacity 220ms var(--ep-ease-out),
-        transform 260ms var(--ep-ease-spring),
-        filter 260ms var(--ep-ease-spring);
     }
     .ep-right-stack.ep-state-schedule .ep-schedule-widget {
       opacity: 1 !important;
-      transform: translateY(0) scale(1) translateZ(0) !important;
-      filter: blur(0) saturate(1) !important;
       visibility: visible !important;
       pointer-events: auto !important;
       position: relative !important;
-      transition-delay: 40ms;
     }
     .ep-right-stack.ep-state-schedule .dues-container,
     .ep-right-stack.ep-state-schedule .ep-mail-widget,
     .ep-right-stack.ep-state-schedule .ep-miuv-widget,
     .ep-right-stack.ep-state-schedule .ep-config-widget {
-      opacity: 0 !important;
-      transform: translateY(10px) scale(0.96) translateZ(0) !important;
-      filter: blur(6px) saturate(1.05) !important;
       visibility: hidden !important;
       pointer-events: none !important;
       position: absolute !important;
-      transition:
-        opacity 220ms var(--ep-ease-out),
-        transform 260ms var(--ep-ease-spring),
-        filter 260ms var(--ep-ease-spring);
     }
     .ep-right-stack.ep-state-mail .ep-mail-widget {
       opacity: 1 !important;
-      transform: translateY(0) scale(1) translateZ(0) !important;
-      filter: blur(0) saturate(1) !important;
       visibility: visible !important;
       pointer-events: auto !important;
       position: relative !important;
-      transition-delay: 40ms;
     }
     .ep-right-stack.ep-state-mail .dues-container,
     .ep-right-stack.ep-state-mail .ep-schedule-widget,
     .ep-right-stack.ep-state-mail .ep-miuv-widget,
     .ep-right-stack.ep-state-mail .ep-config-widget {
-      opacity: 0 !important;
-      transform: translateY(10px) scale(0.96) translateZ(0) !important;
-      filter: blur(6px) saturate(1.05) !important;
       visibility: hidden !important;
       pointer-events: none !important;
       position: absolute !important;
-      transition:
-        opacity 220ms var(--ep-ease-out),
-        transform 260ms var(--ep-ease-spring),
-        filter 260ms var(--ep-ease-spring);
     }
     .ep-right-stack.ep-state-miuv .ep-miuv-widget {
       opacity: 1 !important;
-      transform: translateY(0) scale(1) translateZ(0) !important;
-      filter: blur(0) saturate(1) !important;
       visibility: visible !important;
       pointer-events: auto !important;
       position: relative !important;
-      transition-delay: 40ms;
     }
     .ep-right-stack.ep-state-miuv .dues-container,
     .ep-right-stack.ep-state-miuv .ep-schedule-widget,
     .ep-right-stack.ep-state-miuv .ep-mail-widget,
     .ep-right-stack.ep-state-miuv .ep-config-widget {
-      opacity: 0 !important;
-      transform: translateY(10px) scale(0.96) translateZ(0) !important;
-      filter: blur(6px) saturate(1.05) !important;
       visibility: hidden !important;
       pointer-events: none !important;
       position: absolute !important;
-      transition:
-        opacity 220ms var(--ep-ease-out),
-        transform 260ms var(--ep-ease-spring),
-        filter 260ms var(--ep-ease-spring);
     }
     .ep-right-stack.ep-state-config .ep-config-widget {
       opacity: 1 !important;
-      transform: translateY(0) scale(1) translateZ(0) !important;
-      filter: blur(0) saturate(1) !important;
       visibility: visible !important;
       pointer-events: auto !important;
       position: relative !important;
-      transition-delay: 40ms;
     }
     .ep-right-stack.ep-state-config .dues-container,
     .ep-right-stack.ep-state-config .ep-schedule-widget,
     .ep-right-stack.ep-state-config .ep-mail-widget,
     .ep-right-stack.ep-state-config .ep-miuv-widget {
-      opacity: 0 !important;
-      transform: translateY(10px) scale(0.96) translateZ(0) !important;
-      filter: blur(6px) saturate(1.05) !important;
       visibility: hidden !important;
       pointer-events: none !important;
       position: absolute !important;
-      transition:
-        opacity 220ms var(--ep-ease-out),
-        transform 260ms var(--ep-ease-spring),
-        filter 260ms var(--ep-ease-spring);
     }
     /* Hidden: scale+translate+blur, sin animar width (evita layout thrash §11) */
     .ep-right-stack.ep-state-hidden {
@@ -4742,6 +5686,9 @@ function getStylesFull() {
       /* Width colapsa sin animar layout — el gap del wrapper anima visualmente */
       max-width: 0 !important;
       min-width: 0 !important;
+      /* FIX slot: colapso de ALTURA tambien — al cerrar el ultimo widget el stack
+         no debe dejar el hueco de 380px del flex-basis */
+      max-height: 0 !important;
       margin-left: 0 !important;
       flex: 0 0 0 !important;
       overflow: hidden !important;
@@ -4764,11 +5711,16 @@ function getStylesFull() {
     .ep-wrapper.ep-collapsed { gap: 0 !important; }
     .ep-wrapper.ep-collapsed .d-flex.flex-column.align-items-center.mt-3 { flex: 1; max-width: 100%; }
     /* Apple §1 + §10: Response on pointerdown, hover gated, no layout shift */
+    /* FIX sync-beat: el highlight del botón late con la hoja — activar 375ms
+       (curva de entrada) / desactivar 319ms (curva de salida), vía vars que el
+       estado .active reescribe. Solo estado visual (bg/shadow/color), sin layout. */
     .ep-tasks-btn, .ep-schedule-btn, .ep-mail-btn, .ep-miuv-btn, .ep-config-btn {
       position: relative !important;
       transition:
         transform var(--ep-dur-press) var(--ep-ease-out),
-        background var(--ep-dur-fast) var(--ep-ease-out),
+        background var(--ep-btn-beat, 319ms) var(--ep-btn-beat-ease, cubic-bezier(0.32, 0.72, 0, 1)),
+        box-shadow var(--ep-btn-beat, 319ms) var(--ep-btn-beat-ease, cubic-bezier(0.32, 0.72, 0, 1)),
+        color var(--ep-btn-beat, 319ms) var(--ep-btn-beat-ease, cubic-bezier(0.32, 0.72, 0, 1)),
         filter var(--ep-dur-fast) var(--ep-ease-out) !important;
       will-change: transform !important;
       transform: translateZ(0);
@@ -4798,7 +5750,11 @@ function getStylesFull() {
     }
     /* FIX: selección unificada — la píldora deslizante ES el diseño (igual en los 4);
        el botón solo enfatiza el icono. La píldora se mueve con spring e interrumpible (Apple §3/§7/§11). */
+    /* FIX sync-beat: estado activo = beat de ENTRADA (375ms, curva de hoja).
+       Al desactivar (clase fuera) manda el default del grupo: 319ms / salida. */
     .ep-tasks-btn.active, .ep-schedule-btn.active, .ep-schedule-btn.ep-active, .ep-mail-btn.active, .ep-miuv-btn.active, .ep-miuv-btn.ep-active, .ep-config-btn.active, .ep-config-btn.ep-active {
+      --ep-btn-beat: 375ms;
+      --ep-btn-beat-ease: cubic-bezier(0.28, 0.68, 0.28, 1.08);
       background: transparent !important;
       box-shadow: none !important;
       transform: none !important;
@@ -4819,7 +5775,7 @@ function getStylesFull() {
       pointer-events: none !important;
       opacity: 0;
       z-index: 0 !important;
-      transition: transform 380ms cubic-bezier(0.16,1,0.3,1), opacity 220ms ease-out !important;
+      transition: transform 375ms cubic-bezier(0.28, 0.68, 0.28, 1.08), opacity 319ms cubic-bezier(0.32, 0.72, 0, 1) !important;
       will-change: transform, opacity !important;
     }
     @media (prefers-reduced-motion: reduce) {
@@ -4988,6 +5944,70 @@ function getStylesFull() {
       justify-content: flex-end;
       width: 100%;
     }
+
+    /* FIX: pestañas fijas del widget de tareas (reemplazan dropdown) */
+    .ep-tasks-tabs {
+      display: flex !important;
+      gap: 4px !important;
+      width: 100% !important;
+      padding: 4px !important;
+      background: #f1f5f9 !important;
+      border: 1px solid #e2e8f0 !important;
+      border-radius: 12px !important;
+      box-shadow: 0 1px 2px rgba(15,23,42,0.04) inset !important;
+    }
+    .ep-tasks-tab {
+      flex: 1 1 0 !important;
+      min-width: 0 !important;
+      display: inline-flex !important;
+      align-items: center !important;
+      justify-content: center !important;
+      gap: 6px !important;
+      padding: 7px 6px !important;
+      font-size: 12px !important;
+      font-weight: 500 !important;
+      letter-spacing: -0.01em !important;
+      line-height: 1 !important;
+      color: #64748b !important;
+      background: transparent !important;
+      border: 1px solid transparent !important;
+      border-radius: 8px !important;
+      cursor: pointer !important;
+      white-space: nowrap !important;
+      overflow: hidden !important;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif !important;
+      transition: none !important;
+    }
+    .ep-tasks-tab:hover { background: rgba(255,255,255,0.6) !important; color: #334155 !important; }
+    .ep-tasks-tab:focus-visible { outline: 2px solid var(--ep-accent) !important; outline-offset: 2px !important; }
+    .ep-tasks-tab.active {
+      color: #0f172a !important;
+      background: #ffffff !important;
+      border-color: rgba(226,232,240,0.9) !important;
+      font-weight: 650 !important;
+      box-shadow: 0 1px 3px rgba(15,23,42,0.08), 0 0 0 1px rgba(15,23,42,0.04) !important;
+    }
+    .ep-tasks-tab-count {
+      display: inline-flex !important;
+      align-items: center !important;
+      justify-content: center !important;
+      min-width: 18px !important;
+      height: 18px !important;
+      padding: 0 5px !important;
+      font-size: 10px !important;
+      font-weight: 700 !important;
+      border-radius: 999px !important;
+      background: #e2e8f0 !important;
+      color: #64748b !important;
+      border: 1px solid rgba(226,232,240,0.9) !important;
+      line-height: 1 !important;
+    }
+    .ep-tasks-tab-count.has-count {
+      background: var(--ep-accent-soft) !important;
+      color: var(--ep-accent) !important;
+      border-color: var(--ep-accent-ring) !important;
+    }
+    .ep-tasks-tab.active .ep-tasks-tab-count { background: #e2e8f0 !important; color: #0f172a !important; }
 
     .dropdown-container {
       position: relative;
@@ -6420,8 +7440,8 @@ function getStylesFull() {
     }
     .activity-description:empty { display: none; }
 
-    /* exams/foros mantienen brutalist; tareas usa btn-solid-spec estilo Asistente (excluido aquí) */
-    .view-activity-btn:not(.btn-solid-spec), .view-exam-btn, .view-forum-btn {
+    /* exams/foros: mismo estilo spec que tareas (btn-solid-spec); brutalist solo si no lo llevan */
+    .view-activity-btn:not(.btn-solid-spec), .view-exam-btn:not(.btn-solid-spec), .view-forum-btn:not(.btn-solid-spec) {
       background: #0f172a !important;
       border: 1px solid #0f172a !important;
       color: #ffffff !important;
@@ -6441,7 +7461,7 @@ function getStylesFull() {
       font-family: "Courier New", monospace !important;
     }
 
-    .view-activity-btn:not(.btn-solid-spec):hover, .view-exam-btn:hover, .view-forum-btn:hover {
+    .view-activity-btn:not(.btn-solid-spec):hover, .view-exam-btn:not(.btn-solid-spec):hover, .view-forum-btn:not(.btn-solid-spec):hover {
       background: #1e293b !important;
       border-color: #1e293b !important;
       transform: translateY(-1px) !important;
@@ -6800,6 +7820,54 @@ function getStylesFull() {
     html.ep-dark.ep-normal-warning body .act-item.warning .course-name-spec { color: #ffffff !important; }
     html.ep-dark.ep-normal-safe body .act-item.safe .course-name-spec { color: #ffffff !important; }
 
+    /* ===== Modos de vista (plan 678879b6): Compacta / Por fecha / Compacta por fecha.
+       TODO bajo .dues-container.ep-view-* — las páginas de curso NO se tocan.
+       Colores: solo vars existentes --ep-urg-* y --ep-accent (urgencia y acento sobreviven). ===== */
+    /* --- Compacta: fila delgada, sin descripción --- */
+    .dues-container.ep-view-compact .acts-list .act-item { padding: 9px 12px 9px 13px !important; margin: 0 0 7px 0 !important; }
+    .dues-container.ep-view-compact .acts-list .act-item .course-name-spec { font-size: 9.5px !important; margin-bottom: 4px !important; letter-spacing: 0.06em !important; }
+    .dues-container.ep-view-compact .acts-list .act-item .ai-section-spec,
+    .dues-container.ep-view-compact .acts-list .act-item .score-pill-spec { display: none !important; }
+    .dues-container.ep-view-compact .acts-list .act-item .title-row-spec { margin-bottom: 6px !important; gap: 8px !important; }
+    .dues-container.ep-view-compact .acts-list .act-item .title-spec { font-size: 12.5px !important; font-weight: 650 !important; line-height: 1.28 !important; -webkit-line-clamp: 1 !important; display: block !important; white-space: nowrap !important; text-overflow: ellipsis !important; overflow: hidden !important; }
+    .dues-container.ep-view-compact .acts-list .act-item .info-row-spec { margin-bottom: 7px !important; gap: 5px !important; flex-wrap: nowrap !important; }
+    .dues-container.ep-view-compact .acts-list .act-item .info-row-spec .chip-spec { font-size: 10px !important; min-height: 18px !important; padding: 3px 7px !important; max-width: 70% !important; }
+    .dues-container.ep-view-compact .acts-list .act-item .footer-row-spec { margin-top: 6px !important; padding: 5px 6px !important; gap: 6px !important; border-radius: 10px !important; }
+    .dues-container.ep-view-compact .acts-list .act-item .footer-row-spec .urgency-pill-spec { height: 22px !important; min-height: 22px !important; padding: 0 8px !important; font-size: 10px !important; }
+    .dues-container.ep-view-compact .acts-list .act-item .footer-row-spec .urgency-pill-spec svg { width: 9px !important; height: 9px !important; }
+    .dues-container.ep-view-compact .acts-list .act-item .btn-solid-spec { height: 22px !important; min-height: 22px !important; padding: 0 9px 0 10px !important; font-size: 10px !important; }
+    .dues-container.ep-view-compact .acts-list .act-item::before { width: 2.5px !important; }
+    /* Compacta W3: sin botón Ver actividad — la tarjeta abre la actividad con un click.
+       El footer completo desaparece (ese espacio lo ocupaba la capa + botón) y la
+       píldora de días restantes vive en el info-row, al lado de día y hora. La píldora
+       es el MISMO nodo movido por JS (__ep_applyViewMode): conserva los colores de
+       urgencia configurables (--ep-urg-*) en claro y oscuro. */
+    .dues-container.ep-view-compact .acts-list .act-item { cursor: pointer; }
+    .dues-container.ep-view-compact .acts-list .act-item .footer-row-spec { display: none !important; }
+    .dues-container.ep-view-compact .acts-list .act-item .info-row-spec .urgency-pill-spec { margin-left: auto !important; height: 18px !important; min-height: 18px !important; padding: 0 7px !important; font-size: 10px !important; box-shadow: none !important; flex-shrink: 0 !important; }
+    .dues-container.ep-view-compact .acts-list .act-item .info-row-spec .urgency-pill-spec svg { width: 9px !important; height: 9px !important; }
+    .dues-container.ep-view-compact .acts-list .act-item .info-row-spec .urgency-pill-spec .pill-label { font-size: 10px !important; }
+    .dues-container.ep-view-compact .acts-list .act-item .info-row-spec .chip-spec { margin-right: 0 !important; }
+    /* FIX compacta foros: el info-row del foro traía 4 chips + la píldora movida por JS
+       (nowrap) — se atiborraba y no se entendía. En compacta solo quedan fecha + píldora;
+       comentarios/nuevos/hora se retiran (viven en la vista normal). */
+    .dues-container.ep-view-compact .acts-list .act-item.forum .info-row-spec .chip-forum-com,
+    .dues-container.ep-view-compact .acts-list .act-item.forum .info-row-spec .chip-forum-new,
+    .dues-container.ep-view-compact .acts-list .act-item.forum .info-row-spec .chip-forum-time { display: none !important; }
+    /* --- Simple (plan 678879b6 W2): modo retirado. Reemplazado por 'compact-date'
+       (ep-view-compact + ep-view-date juntos): fila delgada + separadores por fecha. --- */
+    /* --- Por fecha: tarjetas por defecto SIN CAMBIOS + separadores de bucket --- */
+    .dues-container.ep-view-date .ep-date-sep { display: flex; align-items: center; gap: 8px; margin: 2px 0 9px; padding: 0 2px 6px; pointer-events: none; user-select: none; cursor: default; }
+    .dues-container.ep-view-date .ep-date-sep span { font-size: 10px; font-weight: 700; letter-spacing: 0.09em; text-transform: uppercase; color: var(--ep-accent); line-height: 1; flex: 0 0 auto; }
+    .dues-container.ep-view-date .ep-date-sep em { font-style: normal; font-size: 9.5px; font-weight: 700; color: #64748b; background: #f1f5f9; border: 1px solid #e2e8f0; border-radius: 999px; padding: 2px 7px; line-height: 1.2; flex: 0 0 auto; font-variant-numeric: tabular-nums; }
+    .dues-container.ep-view-date .ep-date-sep::after { content: ''; flex: 1 1 auto; height: 1px; background: linear-gradient(90deg, var(--ep-accent-ring, rgba(6,182,212,0.25)), transparent); }
+    /* Oscuro: separadores + ajustes compacta */
+    .ep-dark .dues-container.ep-view-date .ep-date-sep span, .dues-container.ep-dark.ep-view-date .ep-date-sep span { color: var(--ep-accent); text-shadow: none; }
+    .ep-dark .dues-container.ep-view-date .ep-date-sep em, .dues-container.ep-dark.ep-view-date .ep-date-sep em { background: #1e2e4a; border-color: #2a3f62; color: #94a3b8; }
+    .ep-dark .dues-container.ep-view-date .ep-date-sep::after, .dues-container.ep-dark.ep-view-date .ep-date-sep::after { background: linear-gradient(90deg, #2a3f62, transparent); }
+    .ep-dark .dues-container.ep-view-compact .acts-list .act-item .info-row-spec .chip-spec, .dues-container.ep-dark.ep-view-compact .acts-list .act-item .info-row-spec .chip-spec { background: #1e2e4a !important; border-color: #2a3f62 !important; color: #cbd5e1 !important; }
+    .ep-dark .dues-container.ep-view-compact .acts-list .act-item .footer-row-spec, .dues-container.ep-dark.ep-view-compact .acts-list .act-item .footer-row-spec { background: #16203a !important; border-color: #1e2e4a !important; }
+
     .act-item.warning::before {
       background: var(--ep-urg-warning, #f59e0b);
       box-shadow: 0 0 12px var(--ep-urg-warning-glow, transparent);
@@ -6852,10 +7920,15 @@ function getStylesFull() {
     html:not(.ep-dark) body .act-item .urgency-pill-spec .pill-label { color:#ffffff !important; text-shadow:0 1px 2px rgba(0,0,0,0.35) !important; }
     html:not(.ep-dark) body .act-item .urgency-pill-spec svg { color:#ffffff !important; }
     html:not(.ep-dark) body .activity-days-left { color:#ffffff !important; text-shadow:0 1px 2px rgba(0,0,0,0.35) !important; }
-    /* Modo oscuro: igual, blanco siempre */
+    /* Modo oscuro: la etiqueta y el icono heredan el color AA de la píldora (var --ep-urg-*-tx
+       calculado por __ep_urgText). El blanco forzado rompía AA sobre urgencias claras
+       (2.15:1 sobre #f59e0b, 2.77:1 sobre #0ea5e9) — D1. */
+    html.ep-dark body .activity-days-left { color:#ffffff !important; text-shadow:0 1px 2px rgba(0,0,0,0.45) !important; }
+    /* FIX dark (petición): letra blanca en la píldora de días restantes en modo oscuro.
+       El repintado inline de applyEpConfig usa el mismo criterio (respaldo por si el
+       repintado aún no corre). Solo .act-item — el correo (ep-mail-item) conserva su AA. */
     html.ep-dark body .act-item .urgency-pill-spec .pill-label { color:#ffffff !important; text-shadow:0 1px 2px rgba(0,0,0,0.45) !important; }
     html.ep-dark body .act-item .urgency-pill-spec svg { color:#ffffff !important; }
-    html.ep-dark body .activity-days-left { color:#ffffff !important; text-shadow:0 1px 2px rgba(0,0,0,0.45) !important; }
 
     .act-item.expired::before {
       background: #e2e8f0;
@@ -7091,10 +8164,10 @@ function getStylesFull() {
       margin: 0 2px !important;
       will-change: transform !important;
       transform: translateZ(0) !important;
-      transition: transform var(--ep-dur-press) var(--ep-ease-out), background var(--ep-dur-fast) var(--ep-ease-out), filter var(--ep-dur-fast) var(--ep-ease-out) !important;
+      transition: transform var(--ep-dur-press) var(--ep-ease-out), background var(--ep-btn-beat, 319ms) var(--ep-btn-beat-ease, cubic-bezier(0.32, 0.72, 0, 1)), box-shadow var(--ep-btn-beat, 319ms) var(--ep-btn-beat-ease, cubic-bezier(0.32, 0.72, 0, 1)), color var(--ep-btn-beat, 319ms) var(--ep-btn-beat-ease, cubic-bezier(0.32, 0.72, 0, 1)), filter var(--ep-dur-fast) var(--ep-ease-out) !important;
       touch-action: manipulation !important;
     }
-    .ep-schedule-btn:hover, .ep-mail-btn:hover, .ep-tasks-btn:hover, .ep-config-btn:hover { background: rgba(255,255,255,0.12) !important; color: #fff !important; filter: brightness(1.06) !important; }
+    .ep-schedule-btn:hover, .ep-mail-btn:hover, .ep-tasks-btn:hover { background: rgba(255,255,255,0.12) !important; color: #fff !important; filter: brightness(1.06) !important; }
     .ep-schedule-btn:active, .ep-mail-btn:active, .ep-tasks-btn:active, .ep-config-btn:active { transform: scale(0.96) translateZ(0) !important; transition-duration: 100ms !important; filter: brightness(0.98) !important; }
     .ep-schedule-icon, .ep-mail-icon, .ep-tasks-icon, .ep-miuv-icon, .ep-config-icon { width: 19px !important; height: 19px !important; display: block !important; pointer-events: none !important; transition: transform 260ms var(--ep-ease-spring) !important; will-change: transform !important; transform: translateZ(0) !important; stroke-width: 2.6 !important; vector-effect: non-scaling-stroke !important; }
     .ep-schedule-btn:hover .ep-schedule-icon, .ep-mail-btn:hover .ep-mail-icon, .ep-tasks-btn:hover .ep-tasks-icon, .ep-config-btn:hover .ep-config-icon { transform: scale(1.04) translateZ(0) !important; }
@@ -7116,7 +8189,7 @@ function getStylesFull() {
       margin: 0 2px !important;
       will-change: transform !important;
       transform: translateZ(0) !important;
-      transition: transform var(--ep-dur-press) var(--ep-ease-out), background var(--ep-dur-fast) var(--ep-ease-out), filter var(--ep-dur-fast) var(--ep-ease-out) !important;
+      transition: transform var(--ep-dur-press) var(--ep-ease-out), background var(--ep-btn-beat, 319ms) var(--ep-btn-beat-ease, cubic-bezier(0.32, 0.72, 0, 1)), box-shadow var(--ep-btn-beat, 319ms) var(--ep-btn-beat-ease, cubic-bezier(0.32, 0.72, 0, 1)), color var(--ep-btn-beat, 319ms) var(--ep-btn-beat-ease, cubic-bezier(0.32, 0.72, 0, 1)), filter var(--ep-dur-fast) var(--ep-ease-out) !important;
       touch-action: manipulation !important;
       z-index: 1 !important;
     }
@@ -7125,6 +8198,81 @@ function getStylesFull() {
     @media (hover: hover) and (pointer: fine) {
       .m-notification .ep-config-btn:hover { background: rgba(255,255,255,0.12) !important; color: #fff !important; filter: brightness(1.06) !important; }
       .m-notification .ep-config-btn:hover svg, .m-notification .ep-config-btn:hover .ep-config-icon { transform: scale(1.04) translateZ(0) !important; }
+    }
+    /* FIX claro: el engranaje vive sobre superficie clara en modo claro — el velo blanco
+       lo borraba al pasar. Misma animación que tareas (velo suave + icono que crece),
+       tono oscuro para que el icono se vea; en oscuro queda el velo blanco. */
+    @media (hover: hover) and (pointer: fine) {
+      html:not(.ep-dark) .ep-config-btn:hover { background: transparent !important; border-color: transparent !important; color: #0f172a !important; filter: none !important; }
+    }
+    /* FIX campana: botón de notificaciones — misma gramática que los 5 de la barra */
+    .m-notification .ep-bell-btn {
+      position: relative !important;
+      display: flex !important;
+      align-items: center !important;
+      justify-content: center !important;
+      width: 38px !important;
+      height: 38px !important;
+      border-radius: 50% !important;
+      cursor: pointer !important;
+      color: rgba(255,255,255,0.85) !important;
+      background: transparent !important;
+      border: none !important;
+      padding: 0 !important;
+      margin: 0 2px !important;
+      will-change: transform !important;
+      transform: translateZ(0) !important;
+      transition: transform var(--ep-dur-press) var(--ep-ease-out), background var(--ep-btn-beat, 319ms) var(--ep-btn-beat-ease, cubic-bezier(0.32, 0.72, 0, 1)), box-shadow var(--ep-btn-beat, 319ms) var(--ep-btn-beat-ease, cubic-bezier(0.32, 0.72, 0, 1)), color var(--ep-btn-beat, 319ms) var(--ep-btn-beat-ease, cubic-bezier(0.32, 0.72, 0, 1)), filter var(--ep-dur-fast) var(--ep-ease-out) !important;
+      touch-action: manipulation !important;
+      z-index: 1 !important;
+    }
+    .m-notification .ep-bell-btn:active { transform: scale(0.96) translateZ(0) !important; transition-duration: 100ms !important; filter: brightness(0.98) !important; }
+    .m-notification .ep-bell-btn svg, .m-notification .ep-bell-btn .ep-bell-icon { width: 19px !important; height: 19px !important; display: block !important; pointer-events: none !important; transition: transform 260ms var(--ep-ease-spring) !important; will-change: transform !important; transform: translateZ(0) !important; stroke-width: 2.6 !important; vector-effect: non-scaling-stroke !important; }
+    @media (hover: hover) and (pointer: fine) {
+      .m-notification .ep-bell-btn:hover { background: rgba(255,255,255,0.12) !important; color: #fff !important; filter: brightness(1.06) !important; }
+      .m-notification .ep-bell-btn:hover svg, .m-notification .ep-bell-btn:hover .ep-bell-icon { transform: scale(1.04) translateZ(0) !important; }
+    }
+    /* Estado activo = avisos encendidos: píldora fija propia (no compite con la de widgets) */
+    .m-notification .ep-bell-btn.active { background: rgba(255,255,255,0.16) !important; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.22), 0 1px 4px rgba(0,0,0,0.10) !important; color: #fff !important; }
+    .m-notification .ep-bell-btn.active svg, .m-notification .ep-bell-btn.active .ep-bell-icon { transform: scale(1.06) translateZ(0) !important; }
+    html.ep-dark .m-notification .ep-bell-btn.active, .ep-dark .m-notification .ep-bell-btn.active, body.ep-dark .m-notification .ep-bell-btn.active { background: rgba(148,163,184,0.18) !important; box-shadow: inset 0 0 0 1px rgba(148,163,184,0.30) !important; color: #f1f5f9 !important; }
+    .m-notification .ep-bell-btn:focus-visible { outline: 2px solid var(--ep-accent, #06b6d4); outline-offset: 2px !important; }
+    @media (prefers-reduced-motion: reduce) {
+      .m-notification .ep-bell-btn, .m-notification .ep-bell-btn svg, .m-notification .ep-bell-btn .ep-bell-icon { transition: opacity 160ms ease !important; transform: none !important; animation: none !important; }
+    }
+    @keyframes epBellToastIn { from { opacity: 0; transform: translateY(-8px) scale(0.97); } to { opacity: 1; transform: translateY(0) scale(1); } }
+    /* Campana POR TARJETA: opt-in de avisos de esa tarea (visible en todas las vistas del widget) */
+    .acts-list .act-item { position: relative; }
+    .ep-card-bell-btn {
+      position: absolute !important; top: 10px !important; right: 10px !important; z-index: 2 !important;
+      display: inline-flex !important; align-items: center !important; justify-content: center !important;
+      width: 24px !important; height: 24px !important; flex-shrink: 0 !important;
+      border-radius: 999px !important; border: 1px solid rgba(148,163,184,0.22) !important;
+      background: rgba(148,163,184,0.08) !important; color: #64748b !important; cursor: pointer !important;
+      padding: 0 !important; margin: 0 !important;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.35) !important;
+      transition: color 160ms var(--ep-ease-out, ease), background var(--ep-btn-beat, 319ms) var(--ep-btn-beat-ease, cubic-bezier(0.32, 0.72, 0, 1)), border-color var(--ep-btn-beat, 319ms) var(--ep-btn-beat-ease, cubic-bezier(0.32, 0.72, 0, 1)), box-shadow 200ms var(--ep-ease-out, ease), transform 200ms var(--ep-ease-spring, ease) !important;
+      touch-action: manipulation !important;
+    }
+    .ep-card-bell-btn svg { width: 14px !important; height: 14px !important; display: block !important; pointer-events: none !important; transition: transform 260ms var(--ep-ease-spring, ease) !important; will-change: transform !important; }
+    .ep-card-bell-btn:hover { background: rgba(148,163,184,0.16) !important; border-color: rgba(148,163,184,0.34) !important; color: #334155 !important; box-shadow: inset 0 1px 0 rgba(255,255,255,0.40), 0 1px 3px rgba(15,23,42,0.10) !important; }
+    .ep-card-bell-btn:hover svg { transform: scale(1.06) translateZ(0) !important; }
+    .ep-card-bell-btn:active { transform: scale(0.92) translateZ(0) !important; transition-duration: 100ms !important; }
+    /* Activo: campana rellena + halo del acento — presencia real sin gritar */
+    .ep-card-bell-btn.active { color: var(--ep-accent, #06b6d4) !important; background: var(--ep-accent-soft, rgba(6,182,212,0.08)) !important; border-color: var(--ep-accent-ring, rgba(6,182,212,0.20)) !important; box-shadow: 0 0 0 3px var(--ep-accent-soft, rgba(6,182,212,0.08)), inset 0 1px 0 rgba(255,255,255,0.25) !important; animation: epBellPop 340ms var(--ep-ease-spring, ease) !important; }
+    .ep-card-bell-btn.active svg { fill: currentColor !important; }
+    @keyframes epBellPop { 0% { transform: scale(0.90) translateZ(0); } 55% { transform: scale(1.06) translateZ(0); } 100% { transform: scale(1) translateZ(0); } }
+    .ep-dark .ep-card-bell-btn { color: #94a3b8 !important; border-color: rgba(148,163,184,0.25) !important; background: rgba(148,163,184,0.10) !important; box-shadow: inset 0 1px 0 rgba(255,255,255,0.06) !important; }
+    .ep-dark .ep-card-bell-btn:hover { background: rgba(148,163,184,0.18) !important; border-color: rgba(148,163,184,0.36) !important; color: #e2e8f0 !important; box-shadow: inset 0 1px 0 rgba(255,255,255,0.08), 0 1px 3px rgba(0,0,0,0.35) !important; }
+    .ep-dark .ep-card-bell-btn.active { color: var(--ep-accent, #06b6d4) !important; background: var(--ep-accent-soft, rgba(148,163,184,0.14)) !important; border-color: var(--ep-accent-ring, rgba(148,163,184,0.28)) !important; box-shadow: 0 0 0 3px rgba(148,163,184,0.12), inset 0 1px 0 rgba(255,255,255,0.08) !important; }
+    .ep-card-bell-btn:focus-visible { outline: 2px solid var(--ep-accent, #06b6d4); outline-offset: 2px !important; }
+    /* Reserva de espacio: la campana vive en la esquina — curso/título no corren por debajo (solo cards con campana) */
+    .acts-list .act-item:has(.ep-card-bell-btn) .course-name-spec { padding-right: 32px !important; }
+    .dues-container.ep-view-compact .acts-list .act-item .ep-card-bell-btn { top: 5px !important; right: 6px !important; width: 22px !important; height: 22px !important; }
+    .dues-container.ep-view-compact .acts-list .act-item:has(.ep-card-bell-btn) .course-name-spec { padding-right: 28px !important; }
+    .dues-container.ep-view-compact .acts-list .act-item:has(.ep-card-bell-btn) .title-spec { padding-right: 28px !important; }
+    @media (prefers-reduced-motion: reduce) {
+      .ep-card-bell-btn, .ep-card-bell-btn svg { transition: none !important; animation: none !important; }
     }
 
     .ep-schedule-panel {
@@ -7305,7 +8453,7 @@ function getStylesFull() {
       transition: none !important;
       will-change: transform;
     }
-    .ep-schedule-tab.active .ep-tab-count { background: var(--ep-accent, #1e6fd0) !important; color: var(--ep-on-accent, #fff) !important; transform: scale(1.02) translateZ(0) !important; }
+    .ep-schedule-tab.active .ep-tab-count { background: var(--ep-accent, #1e6fd0) !important; color: var(--ep-on-accent, #fff) !important; transform: scale(1.02) translateZ(0) !important; box-shadow: none !important; }
     .ep-schedule-tab.is-today {
       position: relative !important;
       background: var(--ep-accent-soft) !important;
@@ -8368,18 +9516,22 @@ function getStylesFull() {
     .ep-dark {
       --ep-liquid-shadow: 0 24px 60px -16px rgba(0,0,0,.45), 0 2px 8px rgba(0,0,0,.2), inset 0 1px 0 rgba(255,255,255,.14), inset 0 -1px 0 rgba(255,255,255,.05);
     }
-    /* Stack: push de ancho deslizado (iOS), sin salto de layout */
+    /* Stack: push de ancho deslizado (iOS), sin salto de layout.
+       FIX sync-beat: el stack SOLO transiciona tamaño (flex-basis/max-width/
+       min-width/max-height/margin) — nunca opacity/transform/filter (la
+       disolución del widget la dibuja el sistema fluid; aquí había
+       doble-animación). Beat de ENTRADA: 375ms curva de hoja. */
     .ep-right-stack {
       transition:
-        opacity var(--ep-dur-stack) var(--ep-ease-spring),
-        transform var(--ep-dur-stack) var(--ep-ease-spring),
-        filter var(--ep-dur-stack) var(--ep-ease-spring),
-        flex-basis 440ms var(--ep-ease-drawer),
-        max-width 440ms var(--ep-ease-drawer),
-        min-width 440ms var(--ep-ease-drawer),
-        margin-left 440ms var(--ep-ease-drawer);
+        flex-basis var(--ep-stack-beat, 375ms) var(--ep-stack-beat-ease, cubic-bezier(0.28, 0.68, 0.28, 1.08)),
+        max-width var(--ep-stack-beat, 375ms) var(--ep-stack-beat-ease, cubic-bezier(0.28, 0.68, 0.28, 1.08)),
+        min-width var(--ep-stack-beat, 375ms) var(--ep-stack-beat-ease, cubic-bezier(0.28, 0.68, 0.28, 1.08)),
+        max-height var(--ep-stack-beat, 375ms) var(--ep-stack-beat-ease, cubic-bezier(0.28, 0.68, 0.28, 1.08)),
+        margin-left var(--ep-stack-beat, 375ms) var(--ep-stack-beat-ease, cubic-bezier(0.28, 0.68, 0.28, 1.08));
     }
-    /* Cierre del stack: disolucion con blur suave y ancho deslizando */
+    /* Cierre del stack: ancho/altura deslizan en el beat de SALIDA (319ms, curva
+       de salida); opacity/transform/filter quedan como estado final instantáneo
+       (los widgets ya se fueron con su propio exit). */
     .ep-right-stack.ep-state-hidden {
       opacity: 0 !important;
       transform: translateY(10px) scale(0.98) translateZ(0) !important;
@@ -8388,23 +9540,21 @@ function getStylesFull() {
       pointer-events: none !important;
       max-width: 0 !important;
       min-width: 0 !important;
+      /* FIX slot: colapso de altura para el caso "todo cerrado" */
+      max-height: 0 !important;
       margin-left: 0 !important;
       flex: 0 0 0 !important;
       overflow: hidden !important;
       transition:
-        flex-basis 420ms var(--ep-ease-drawer),
-        max-width 420ms var(--ep-ease-drawer),
-        min-width 420ms var(--ep-ease-drawer),
-        margin-left 420ms var(--ep-ease-drawer),
-        opacity 240ms var(--ep-ease-drawer),
-        transform 340ms var(--ep-ease-drawer),
-        filter 340ms var(--ep-ease-drawer),
-        backdrop-filter 340ms var(--ep-ease-drawer),
-        -webkit-backdrop-filter 340ms var(--ep-ease-drawer),
-        box-shadow 340ms var(--ep-ease-drawer),
-        visibility 0ms linear 360ms !important;
+        flex-basis 319ms cubic-bezier(0.32, 0.72, 0, 1),
+        max-width 319ms cubic-bezier(0.32, 0.72, 0, 1),
+        min-width 319ms cubic-bezier(0.32, 0.72, 0, 1),
+        max-height 319ms cubic-bezier(0.32, 0.72, 0, 1),
+        margin-left 319ms cubic-bezier(0.32, 0.72, 0, 1),
+        visibility 0ms linear 300ms !important;
     }
-    .ep-wrapper { transition: gap 420ms var(--ep-ease-drawer); }
+    .ep-wrapper { transition: gap var(--ep-gap-beat, 375ms) var(--ep-gap-beat-ease, cubic-bezier(0.28, 0.68, 0.28, 1.08)); }
+    .ep-wrapper:has(.ep-right-stack.ep-state-hidden) { --ep-gap-beat: 319ms; --ep-gap-beat-ease: cubic-bezier(0.32, 0.72, 0, 1); }
     /* Colapso total (ultimo widget cerrado): mismo movimiento que ep-state-hidden */
     .ep-wrapper.ep-collapsed .ep-right-stack {
       opacity: 0 !important;
@@ -8418,27 +9568,22 @@ function getStylesFull() {
       flex: 0 0 0 !important;
       overflow: hidden !important;
       transition:
-        visibility 360ms linear,
-        opacity 300ms var(--ep-ease-drawer),
-        transform 420ms var(--ep-ease-drawer),
-        filter 420ms var(--ep-ease-drawer),
-        flex-basis 420ms var(--ep-ease-drawer),
-        max-width 420ms var(--ep-ease-drawer),
-        min-width 420ms var(--ep-ease-drawer),
-        margin-left 420ms var(--ep-ease-drawer) !important;
+        flex-basis 319ms cubic-bezier(0.32, 0.72, 0, 1),
+        max-width 319ms cubic-bezier(0.32, 0.72, 0, 1),
+        min-width 319ms cubic-bezier(0.32, 0.72, 0, 1),
+        max-height 319ms cubic-bezier(0.32, 0.72, 0, 1),
+        margin-left 319ms cubic-bezier(0.32, 0.72, 0, 1),
+        visibility 0ms linear 300ms !important;
     }
-    /* Entrada inicial (@starting-style): punto de partida mas suave */
-    @starting-style {
-      .ep-right-stack .dues-container,
-      .ep-right-stack .ep-schedule-widget,
-      .ep-right-stack .ep-mail-widget,
-      .ep-right-stack .ep-miuv-widget,
-      .ep-right-stack .ep-config-widget {
-        opacity: 0;
-        transform: translateY(18px) scale(0.965) translateZ(0);
-        filter: blur(12px) saturate(1.6);
-      }
+    /* FIX sync-beat: guard instantáneo — restore/corrección ({instant:true}) no
+       anima NADA. Va DESPUÉS de las reglas de estado para ganar el cascade a
+       igualdad de especificidad (.ep-wrapper.ep-instant .ep-right-stack > .ep-collapsed). */
+    .ep-instant, .ep-instant *, .ep-wrapper.ep-instant, .ep-right-stack.ep-instant,
+    .ep-wrapper.ep-instant .ep-right-stack, .ep-wrapper.ep-instant .ep-right-stack * {
+      transition: none !important;
     }
+    /* FIX CAUSE 1: @starting-style eliminado — era un segundo punto de partida de
+       movimiento (opacity/transform/filter) que competia con el sistema fluid. */
     /* Entrada de widget (flip de estado): delay 70ms solo en entrada; spring overshoot solo en
        transform, opacity sin overshoot; haze blur interpolando con las 3 funciones de filter (sin matrix fallback) */
     .ep-right-stack.ep-state-tasks .dues-container,
@@ -8447,23 +9592,14 @@ function getStylesFull() {
     .ep-right-stack.ep-state-miuv .ep-miuv-widget,
     .ep-right-stack.ep-state-config .ep-config-widget {
       opacity: 1 !important;
-      transform: translateY(0) scale(1) translateZ(0) !important;
-      filter: blur(0px) saturate(1) !important;
+      visibility: visible !important;
       backdrop-filter: var(--ep-liquid-backdrop-live) !important;
       -webkit-backdrop-filter: var(--ep-liquid-backdrop-live) !important;
       box-shadow: var(--ep-liquid-shadow) !important;
-      visibility: visible !important;
       z-index: 1 !important;
-      transition:
-        transform var(--ep-dur-open) var(--ep-liquid-in) var(--ep-liquid-open-delay),
-        opacity var(--ep-dur-fade) var(--ep-liquid-fade) var(--ep-liquid-open-delay),
-        filter var(--ep-dur-haze) var(--ep-ease-out) var(--ep-liquid-open-delay),
-        backdrop-filter var(--ep-dur-haze) var(--ep-ease-out) var(--ep-liquid-open-delay),
-        -webkit-backdrop-filter var(--ep-dur-haze) var(--ep-ease-out) var(--ep-liquid-open-delay),
-        box-shadow var(--ep-dur-haze) var(--ep-ease-out) var(--ep-liquid-open-delay) !important;
     }
-    /* Salida de widget: visibility ANTES saltaba al instante (desaparecia de golpe);
-       ahora permanece visible durante la disolucion y con curva drawer simetrica */
+    /* Salida de widget: SOLO estado (visibility/pointer-events) — la disolucion la
+       dibuja el sistema fluid; sin transition el estado no re-anima tras .ep-anim */
     .ep-right-stack.ep-state-tasks .ep-schedule-widget,
     .ep-right-stack.ep-state-tasks .ep-mail-widget,
     .ep-right-stack.ep-state-tasks .ep-miuv-widget,
@@ -8484,23 +9620,9 @@ function getStylesFull() {
     .ep-right-stack.ep-state-config .ep-schedule-widget,
     .ep-right-stack.ep-state-config .ep-mail-widget,
     .ep-right-stack.ep-state-config .ep-miuv-widget {
-      opacity: 0 !important;
-      transform: translateY(10px) scale(0.98) translateZ(0) !important;
-      filter: blur(8px) saturate(1.2) !important;
-      backdrop-filter: var(--ep-liquid-backdrop-out) !important;
-      -webkit-backdrop-filter: var(--ep-liquid-backdrop-out) !important;
-      box-shadow: var(--ep-liquid-shadow-exit) !important;
       visibility: hidden !important;
       pointer-events: none !important;
       z-index: 2;
-      transition:
-        opacity var(--ep-dur-close-fade) var(--ep-ease-drawer),
-        transform var(--ep-dur-close) var(--ep-ease-drawer),
-        filter var(--ep-dur-close) var(--ep-ease-drawer),
-        backdrop-filter var(--ep-dur-close) var(--ep-ease-drawer),
-        -webkit-backdrop-filter var(--ep-dur-close) var(--ep-ease-drawer),
-        box-shadow var(--ep-dur-close) var(--ep-ease-drawer),
-        visibility 0ms linear var(--ep-dur-close) !important;
     }
     @media (prefers-reduced-motion: reduce) {
       .ep-right-stack, .ep-right-stack *, .ep-wrapper {
@@ -8851,6 +9973,11 @@ function getEmptyStateHTML(kind) {
 
 // Current content type (activities, exams, forums)
 let currentContentType = 'activities';
+// FIX root-cause cold-boot: el contador de generación DEBE existir desde el arranque.
+// Sin init, window.__ep_tasksGen es undefined y __ep_tasksStale(0) da stale (undefined !== 0)
+// -> loadActivitiesContent/loadExams/loadForums retornaban en silencio en el arranque frío
+// y el skeleton quedaba vivo hasta que un click de pestaña pusiera gen=1.
+window.__ep_tasksGen = 0;
 
 function renderActivities(bearerToken, container, loaderContainer, loader) {
   getAllPendingActivities(bearerToken).then(activities => {
@@ -8897,6 +10024,7 @@ function renderActivities(bearerToken, container, loaderContainer, loader) {
       activityItem.className = `act-item activity ${daysLeftInfo.urgencyClass}`;
       
       const deadline = new Date(activity.fechaTermino);
+      activityItem.dataset.epDueTs = String(deadline.getTime());
       const dateStr = deadline.toLocaleDateString("es-MX");
       const timeStr = deadline.toLocaleTimeString("es-MX", { hour: '2-digit', minute: '2-digit' });
       
@@ -8931,6 +10059,8 @@ function renderActivities(bearerToken, container, loaderContainer, loader) {
       activitiesList.appendChild(activityItem);
     });
     
+    // Modo vista: aplica ep-view-* / agrupa por fecha tras el render del listado
+    try{ __ep_applyViewMode(); }catch{}
     // Populate subject filter after activities are rendered
     setTimeout(() => populateSubjectFilter(), 100);
   }).catch(error => {
@@ -8990,33 +10120,30 @@ function renderExams(bearerToken, container, loaderContainer, loader) {
       const endDate = exam.fechaTermino ? new Date(exam.fechaTermino) : null;
       const endDateStr = endDate ? endDate.toLocaleDateString("es-MX") : 'No definida';
       const endTimeStr = endDate ? endDate.toLocaleTimeString("es-MX", { hour: '2-digit', minute: '2-digit' }) : '';
+      const startDateStr = startDate ? startDate.toLocaleDateString("es-MX") : null;
       const daysLeftInfo = endDate ? getDaysLeftInfo(exam.fechaTermino) : null;
       
       if (daysLeftInfo && daysLeftInfo.class === 'expired') {
         examItem.dataset.expired = 'true';
         examItem.style.display = 'none';
       }
+      if (endDate) examItem.dataset.epDueTs = String(endDate.getTime());
       
+      // SPEC v1.0: misma estructura spec que las tarjetas de tareas
       examItem.innerHTML = `
-        <div class="d-flex flex-column">
-          <div class="activity-header d-flex justify-content-between align-items-center">
-            <h6 class="font-weight-bold mb-0 text-danger">
-              ${exam.courseName}
-            </h6>
+        <div class="card-body-spec">
+          <div class="course-name-spec">${sanitizeHTML(exam.courseName || 'Curso').toUpperCase()}</div>
+          <div class="title-row-spec">
+            <h3 class="title-spec">${sanitizeHTML(exam.nombre || exam.titulo || 'Examen')}</h3>
           </div>
-          <p class="activity-title">${exam.nombre}</p>
-          <div class="activity-date-time">
-            <span class="activity-date">${endDateStr}</span>
-            ${endTimeStr ? `<span class="activity-time">${endTimeStr}</span>` : ''}
+          <div class="info-row-spec">
+            ${startDateStr ? `<span class="chip-spec"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20h16M6 16s1.5-2 6-2 6 2 6 2"/><circle cx="12" cy="8" r="4"/></svg> Inicio: ${startDateStr}</span>` : ''}
+            <span class="chip-spec"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg> ${endDateStr}</span>
+            ${endTimeStr ? `<span class="chip-spec"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg> ${endTimeStr}</span>` : ''}
           </div>
-          <div class="activity-footer">
-            <div class="d-flex justify-content-between align-items-center">
-              <small class="text-muted">Inicio: ${startDate ? startDate.toLocaleDateString("es-MX") : 'No definida'}</small>
-              <button class="btn btn-danger btn-sm view-exam-btn">
-                Ver
-              </button>
-            </div>
-            ${daysLeftInfo ? `<div class="d-flex justify-content-start"><span class="activity-days-left ${daysLeftInfo.class}">${daysLeftInfo.text}</span></div>` : ''}
+          <div class="footer-row-spec">
+            ${daysLeftInfo ? `<span class="urgency-pill-spec"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg><span class="pill-label">${daysLeftInfo.text}</span></span>` : ''}
+            <button class="btn-solid-spec view-activity-btn view-exam-btn"><span class="btn-label">Ver examen</span><span class="btn-chevron"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M9 18l6-6-6-6"/></svg></span></button>
           </div>
         </div>
       `;
@@ -9031,6 +10158,8 @@ function renderExams(bearerToken, container, loaderContainer, loader) {
       activitiesList.appendChild(examItem);
     });
     updateEmptyState();
+    // Modo vista: aplica ep-view-* / agrupa por fecha tras el render
+    try{ __ep_applyViewMode(); }catch{}
   }).catch(error => {
     console.error("Error rendering exams:", error);
     renderErrorMessage(container, loader);
@@ -9093,27 +10222,24 @@ function renderForums(bearerToken, container, loaderContainer, loader) {
       const createdDate = forum.fechaCreacion ? new Date(forum.fechaCreacion) : null;
       const createdDateStr = createdDate ? createdDate.toLocaleDateString("es-MX") : 'No definida';
       const createdTimeStr = createdDate ? createdDate.toLocaleTimeString("es-MX", { hour: '2-digit', minute: '2-digit' }) : '';
+      if (createdDate) forumItem.dataset.epDueTs = String(createdDate.getTime());
       
+      // SPEC v1.0: misma estructura spec que las tarjetas de tareas
       forumItem.innerHTML = `
-        <div class="d-flex flex-column">
-          <div class="activity-header d-flex justify-content-between align-items-center">
-            <h6 class="font-weight-bold mb-0 text-success">
-              ${forum.courseName}
-            </h6>
+        <div class="card-body-spec">
+          <div class="course-name-spec">${sanitizeHTML(forum.courseName || 'Curso').toUpperCase()}</div>
+          <div class="title-row-spec">
+            <h3 class="title-spec">${sanitizeHTML(forum.titulo)}</h3>
           </div>
-          <p class="activity-title">${forum.titulo}</p>
-          <div class="forum-stats">
-            <small class="text-muted">Comentarios: ${forum.numeroComentarios || 0} | Nuevos: ${forum.comentariosNuevos || 0}</small>
+          <div class="info-row-spec">
+            <span class="chip-spec"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg> ${forum.numeroComentarios || 0} comentarios</span>
+            <span class="chip-spec"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.7 4.3L18 9l-4.3 1.7L12 15l-1.7-4.3L6 9l4.3-1.7z"/></svg> ${forum.comentariosNuevos || 0} nuevos</span>
+            <span class="chip-spec"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg> ${createdDateStr}</span>
+            ${createdTimeStr ? `<span class="chip-spec"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg> ${createdTimeStr}</span>` : ''}
           </div>
-          <div class="activity-date-time">
-            <span class="activity-date">${createdDateStr}</span>
-            ${createdTimeStr ? `<span class="activity-time">${createdTimeStr}</span>` : ''}
-          </div>
-          <div class="activity-footer d-flex justify-content-between align-items-center">
-            <span class="activity-days-left ${forumUrgencyInfo.class}">${forumUrgencyInfo.text}</span>
-            <button class="btn btn-success btn-sm view-forum-btn">
-              Ver
-            </button>
+          <div class="footer-row-spec">
+            <span class="urgency-pill-spec"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg><span class="pill-label">${forumUrgencyInfo.text}</span></span>
+            <button class="btn-solid-spec view-activity-btn view-forum-btn"><span class="btn-label">Ver foro</span><span class="btn-chevron"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M9 18l6-6-6-6"/></svg></span></button>
           </div>
         </div>
       `;
@@ -9128,6 +10254,8 @@ function renderForums(bearerToken, container, loaderContainer, loader) {
       activitiesList.appendChild(forumItem);
     });
     updateEmptyState();
+    // Modo vista: aplica ep-view-* / agrupa por fecha tras el render
+    try{ __ep_applyViewMode(); }catch{}
   }).catch(error => {
     console.error("Error rendering forums:", error);
     renderErrorMessage(container, loader);
@@ -9159,164 +10287,43 @@ function setupContentContainer(container, loaderContainer, loader) {
   const headerContainer = document.createElement('div');
   headerContainer.className = 'container-header';
   
-  // Create header top section (title + counter) — parte izquierda
-  const headerTop = document.createElement('div');
-  headerTop.className = 'header-top';
-  
-  const headerLeft = document.createElement('div');
-  headerLeft.className = 'header-left';
-  
-  const headerTitle = document.createElement('h4');
-  headerTitle.className = 'header-title';
-  headerTitle.innerHTML = '<span class="header-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="M9 14l2 2 4-4"/></svg></span> Tareas Pendientes';
-  
-  const activityCounter = document.createElement('div');
-  activityCounter.className = 'activity-counter activities';
-  activityCounter.textContent = '0';
-  
-  headerLeft.appendChild(headerTitle);
-  headerLeft.appendChild(activityCounter);
-  headerTop.appendChild(headerLeft);
-  
-  // Create tab selector (custom dropdown) — parte derecha
+  // Create tab selector — pestañas fijas con contador por tipo (reemplaza dropdown y título)
   const tabSelector = document.createElement('div');
   tabSelector.className = 'tab-selector';
   
-  const dropdownContainer = document.createElement('div');
-  dropdownContainer.className = 'dropdown-container';
+  const tabsBar = document.createElement('div');
+  tabsBar.className = 'ep-tasks-tabs';
   
-  // Create dropdown button — premium sin icono
-  const dropdownButton = document.createElement('div');
-  dropdownButton.className = 'dropdown-button';
-  
-  const buttonText = document.createElement('span');
-  buttonText.textContent = 'Tareas';
-  
-  const dropdownArrow = document.createElement('span');
-  dropdownArrow.className = 'dropdown-arrow';
-  dropdownArrow.textContent = '▲';
-  
-  dropdownButton.appendChild(buttonText);
-  dropdownButton.appendChild(dropdownArrow);
-  
-  // Create dropdown menu
-  const dropdownMenu = document.createElement('div');
-  dropdownMenu.className = 'dropdown-menu';
-  
-  // Premium sin emojis — iconos lineales sutiles
-  const options = [
-    { value: 'activities', icon: '', text: 'Tareas' },
-    { value: 'exams', icon: '', text: 'Exámenes' },
-    { value: 'forums', icon: '', text: 'Foros' }
+  const TASK_TABS = [
+    { value: 'activities', text: 'Tareas' },
+    { value: 'exams', text: 'Exámenes' },
+    { value: 'forums', text: 'Foros' }
   ];
   
-  options.forEach(option => {
-    const dropdownOption = document.createElement('div');
-    dropdownOption.className = 'dropdown-option';
-    dropdownOption.dataset.value = option.value;
-    
-    if (currentContentType === option.value) {
-      dropdownOption.classList.add('selected');
-      buttonText.textContent = option.text;
-    }
-    
-    const optionText = document.createElement('span');
-    optionText.className = 'dropdown-option-text';
-    optionText.textContent = option.text;
-    
-    const optionCheck = document.createElement('span');
-    optionCheck.className = 'dropdown-option-check';
-    optionCheck.innerHTML = '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5l10-10"/></svg>';
-    optionCheck.setAttribute('aria-hidden', 'true');
-    
-    const optionInner = document.createElement('div');
-    optionInner.className = 'dropdown-option-inner';
-    optionInner.appendChild(optionText);
-    optionInner.appendChild(optionCheck);
-    
-    dropdownOption.appendChild(optionInner);
-    
-    dropdownOption.addEventListener('click', () => {
-      document.querySelectorAll('.dropdown-option').forEach(opt => opt.classList.remove('selected'));
-      dropdownOption.classList.add('selected');
-      buttonText.textContent = option.text;
-      try{ if(typeof __ep_dd_close==='function') __ep_dd_close(); else { dropdownMenu.classList.remove('show'); dropdownButton.classList.remove('active'); } }catch{ dropdownMenu.classList.remove('show'); dropdownButton.classList.remove('active'); }
-      switchContent(option.value);
+  tabsBar.innerHTML = TASK_TABS.map(t => `
+    <button type="button" class="ep-tasks-tab${currentContentType === t.value ? ' active' : ''}" data-tasks-tab="${t.value}">
+      <span class="ep-tasks-tab-label">${t.text}</span>
+      <span class="ep-tasks-tab-count">0</span>
+    </button>
+  `).join('');
+  
+  tabsBar.querySelectorAll('.ep-tasks-tab').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      tabsBar.querySelectorAll('.ep-tasks-tab').forEach(b => b.classList.toggle('active', b === btn));
+      try{ navigator.vibrate && navigator.vibrate(8); }catch{}
+      switchContent(btn.dataset.tasksTab);
     });
-    
-    dropdownMenu.appendChild(dropdownOption);
   });
   
-  // FIX SISTÉMICO B: Dropdown portal fixed para escapar overflow:hidden/transform (detrás)
-  let __ep_dd_parent = dropdownContainer;
-  function __ep_dd_pos(){
-    try{
-      const r = dropdownButton.getBoundingClientRect();
-      const w = 200;
-      let left = r.right - w;
-      if(left < 8) left = 8;
-      if(left + w > window.innerWidth - 8) left = window.innerWidth - w - 8;
-      let top = r.bottom + 8;
-      if(top + 180 > window.innerHeight) top = Math.max(8, r.top - 180 - 8);
-      dropdownMenu.style.left = left + 'px';
-      dropdownMenu.style.top = top + 'px';
-      dropdownMenu.style.right = 'auto';
-    }catch{}
-  }
-  function __ep_dd_open(){
-    if(dropdownMenu.parentElement !== document.body){
-      __ep_dd_parent = dropdownContainer;
-      document.body.appendChild(dropdownMenu);
-      try { document.body.classList.add('ep-dd-detached'); } catch {}
-    }
-    __ep_dd_pos();
-    dropdownMenu.classList.add('show');
-    dropdownButton.classList.add('active');
-    window.addEventListener('scroll', __ep_dd_pos, true);
-    window.addEventListener('resize', __ep_dd_pos);
-  }
-  function __ep_dd_close(){
-    dropdownMenu.classList.remove('show');
-    dropdownButton.classList.remove('active');
-    window.removeEventListener('scroll', __ep_dd_pos, true);
-    window.removeEventListener('resize', __ep_dd_pos);
-    setTimeout(()=>{ if(dropdownMenu.parentElement===document.body && __ep_dd_parent){ try{ __ep_dd_parent.appendChild(dropdownMenu); dropdownMenu.style.left=''; dropdownMenu.style.top=''; }catch{} } try{ if(!document.querySelector('body > .dropdown-menu.show')) document.body.classList.remove('ep-dd-detached'); }catch{} }, 320);
-  }
-  dropdownButton.addEventListener('click', (e) => {
-    e.stopPropagation();
-    const isOpen = dropdownMenu.classList.contains('show');
-    const subjectDropdown = document.querySelector('.subject-filter-dropdown');
-    if (subjectDropdown) subjectDropdown.classList.remove('open');
-    if (isOpen) {
-      __ep_dd_close();
-    } else {
-      __ep_dd_open();
-    }
-  });
-  
-  document.addEventListener('click', (e) => {
-    if(e.target.closest('.dropdown-container') || e.target.closest('.dropdown-menu')) return;
-    __ep_dd_close();
-  });
-  document.addEventListener('keydown', (e)=>{ if(e.key==='Escape') __ep_dd_close(); });
-  
-  dropdownContainer.appendChild(dropdownButton);
-  dropdownContainer.appendChild(dropdownMenu);
-  tabSelector.appendChild(dropdownContainer);
-  // parchea clicks de opciones para usar portal close
-  setTimeout(()=>{
-    dropdownMenu.querySelectorAll('.dropdown-option').forEach(opt=>{
-      opt.addEventListener('click', ()=> setTimeout(__ep_dd_close, 80));
-    });
-  }, 0);
+  tabSelector.appendChild(tabsBar);
   
   // Assemble header — fijo, no colapsable
-  headerContainer.appendChild(headerTop);
   headerContainer.appendChild(tabSelector);
   
-  // Create content body — siempre visible
+  // Create content body — siempre visible, with skeleton layer for cross-fade
   const contentBody = document.createElement('div');
-  contentBody.className = 'content-body';
+  contentBody.className = 'content-body ep-skeleton-layer';
   container.classList.add('expanded');
   
   // Create subject filter
@@ -9338,12 +10345,19 @@ function setupContentContainer(container, loaderContainer, loader) {
     </label>
   `;
   
-  // Create activities list — solo skeleton centrado, sin loader duplicado
+  // Create skeleton cards (positioned absolute, will cross-fade out)
+  const skeletonCards = document.createElement('div');
+  skeletonCards.className = 'skeleton-cards';
+  skeletonCards.style.cssText = 'margin: 0 auto; max-width: 320px;';
+  skeletonCards.innerHTML = '<div class="skeleton-card"><div class="skeleton-line short"></div><div class="skeleton-line long"></div></div><div class="skeleton-card"><div class="skeleton-line short"></div><div class="skeleton-line long"></div></div>';
+  
+  // Create activities list — starts empty, content will fade in
   const activitiesList = document.createElement('div');
   activitiesList.className = 'acts-list';
-  activitiesList.innerHTML = '<div class="skeleton-cards" style="margin: 0 auto; max-width: 320px;"><div class="skeleton-card"><div class="skeleton-line short"></div><div class="skeleton-line long"></div></div><div class="skeleton-card"><div class="skeleton-line short"></div><div class="skeleton-line long"></div></div></div>';
+  activitiesList.innerHTML = '';
   
   contentBody.appendChild(filterContainer);
+  contentBody.appendChild(skeletonCards);
   contentBody.appendChild(activitiesList);
   
   // Append elements to container
@@ -9352,58 +10366,132 @@ function setupContentContainer(container, loaderContainer, loader) {
 }
 
 /**
+ * Contadores por pestaña del widget de tareas: cada tab pinta el suyo;
+ * los tipos aún no cargados se prefetchean en fondo (mismo filtro que su tab).
+ */
+window.__ep_tasksCounts = { activities: 0, exams: 0, forums: 0, loaded: {} };
+function __ep_paintTasksTabs() {
+  try {
+    const c = window.__ep_tasksCounts;
+    document.querySelectorAll('.ep-tasks-tab[data-tasks-tab]').forEach(tab => {
+      const badge = tab.querySelector('.ep-tasks-tab-count');
+      if (!badge) return;
+      const n = c[tab.dataset.tasksTab];
+      if (typeof n === 'number') badge.textContent = String(n);
+      badge.classList.toggle('has-count', typeof n === 'number' && n > 0);
+    });
+  } catch {}
+}
+
+let __ep_prefetchBusy = false;
+let __ep_prefetchLast = 0;
+
+async function __ep_countExamsForTabs(bearerToken) {
+  try {
+    const courses = await getAllCourses(bearerToken);
+    if (!courses || courses.length === 0) return 0;
+    const now = new Date();
+    const results = await Promise.allSettled(courses.map(async courseWrapper => {
+      const courseEnd = new Date(courseWrapper.curso.fechaTermino);
+      if (courseEnd < (now.getTime() - (7 * 24 * 60 * 60 * 1000))) return [];
+      const exams = await makeApiRequest(bearerToken, `${API_ENDPOINTS.EXAMS}/${courseWrapper.curso.idCurso}`, "https://eminus.uv.mx/eminus4/page/course/exam");
+      return (exams || []).filter(exam => new Date(exam.fechaTermino) > (now.getTime() - (7 * 24 * 60 * 60 * 1000)) && exam.estadoAvance !== 2);
+    }));
+    let n = 0;
+    for (const r of results) { if (r.status === 'fulfilled') n += r.value.length; }
+    return n;
+  } catch { return null; }
+}
+
+async function __ep_countForumsForTabs(bearerToken) {
+  try {
+    const courses = await getAllCourses(bearerToken);
+    if (!courses || courses.length === 0) return 0;
+    const now = new Date();
+    const results = await Promise.allSettled(courses.map(async courseWrapper => {
+      const courseEnd = new Date(courseWrapper.curso.fechaTermino);
+      if (courseEnd < (now.getTime() - (7 * 24 * 60 * 60 * 1000))) return [];
+      const forums = await makeApiRequest(bearerToken, `${API_ENDPOINTS.FORUMS}/${courseWrapper.curso.idCurso}/0`, "https://eminus.uv.mx/eminus4/page/course/forum");
+      return (forums || []).filter(forum => new Date(forum.fechaInicio) <= now && new Date(forum.fechaTermino) >= now);
+    }));
+    let n = 0;
+    for (const r of results) { if (r.status === 'fulfilled') n += r.value.length; }
+    return n;
+  } catch { return null; }
+}
+
+async function __ep_prefetchTasksCounts() {
+  try {
+    if (__ep_prefetchBusy) return;
+    const bearerToken = localStorage.getItem('accessToken');
+    if (!bearerToken) return;
+    if (Date.now() - __ep_prefetchLast < 60000) return;
+    __ep_prefetchBusy = true;
+    try {
+      const jobs = [];
+      if (!window.__ep_tasksCounts.loaded.exams) jobs.push(['exams', __ep_countExamsForTabs(bearerToken)]);
+      if (!window.__ep_tasksCounts.loaded.forums) jobs.push(['forums', __ep_countForumsForTabs(bearerToken)]);
+      await Promise.allSettled(jobs.map(async ([type, p]) => {
+        const n = await p;
+        if (typeof n === 'number' && !window.__ep_tasksCounts.loaded[type]) {
+          window.__ep_tasksCounts[type] = n;
+          __ep_paintTasksTabs();
+        }
+      }));
+    } finally {
+      __ep_prefetchBusy = false;
+      __ep_prefetchLast = Date.now();
+    }
+  } catch { __ep_prefetchBusy = false; }
+}
+
+// Oculta el skeleton y pinta el contenido/estado vacío DESPUÉS del fade (nunca juntos)
+function __ep_fillAfterSkeleton(skeletonCards, fill) {
+  try {
+    if (skeletonCards && !skeletonCards.classList.contains('ep-skeleton-hidden')) {
+      skeletonCards.classList.add('ep-skeleton-hidden');
+      setTimeout(() => { try { fill(); } catch {} }, 180);
+    } else {
+      fill();
+    }
+  } catch { try { fill(); } catch {} }
+}
+
+/**
  * Switches between different content types
  */
 function switchContent(contentType) {
   console.log(`ðŸ”„ Switching to content type: ${contentType}`);
   currentContentType = contentType;
+  // FIX race pestañas: cada cambio de pestaña invalida las respuestas async en vuelo
+  // (un loader lento de Foros ya no pinta sobre la pestaña Tareas al regresar).
+  window.__ep_tasksGen = (window.__ep_tasksGen || 0) + 1;
   
-  // Update dropdown selection — sin icono
-  const buttonText = document.querySelector('.dropdown-button span:nth-child(1)');
-  const options = document.querySelectorAll('.dropdown-option');
+  // Sync pestañas activas
+  document.querySelectorAll('.ep-tasks-tab[data-tasks-tab]').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.tasksTab === contentType);
+  });
   
-  if (buttonText && options.length > 0) {
-    options.forEach(option => option.classList.remove('selected'));
-    const selectedOption = document.querySelector(`[data-value="${contentType}"]`);
-    if (selectedOption) {
-      selectedOption.classList.add('selected');
-      const text = selectedOption.querySelector('.dropdown-option-text').textContent;
-      buttonText.textContent = text;
-    }
-  }
-  
-  // Clear current content and show loader
+  // Clear current content and show skeleton
   const activitiesList = document.querySelector('.acts-list');
-  const headerTitle = document.querySelector('.header-title');
-  const activityCounter = document.querySelector('.activity-counter');
+  const contentBody = document.querySelector('.content-body.ep-skeleton-layer');
+  const skeletonCards = contentBody ? contentBody.querySelector('.skeleton-cards') : null;
   
   if (activitiesList) {
-    activitiesList.innerHTML = '<div class="skeleton-cards" style="margin: 0 auto; max-width: 320px;"><div class="skeleton-card"><div class="skeleton-line short"></div><div class="skeleton-line long"></div></div></div>';
+    activitiesList.innerHTML = '';
+  }
+  // Show skeleton (cross-fade will happen in the loader)
+  if (skeletonCards) {
+    skeletonCards.classList.remove('ep-skeleton-hidden');
+  }
+  // Reset stagger animation
+  if (activitiesList) {
+    activitiesList.classList.remove('animate-in');
   }
   
-  // Update header and counter immediately — FIX C: Solo tareas/exams/foros en widget principal
-  if (headerTitle && activityCounter) {
-    // Remove existing counter classes
-    activityCounter.className = 'activity-counter';
-    
-    switch (contentType) {
-      case 'activities':
-        updateHeaderTitle(headerTitle, 'Tareas Pendientes');
-        activityCounter.classList.add('activities');
-        activityCounter.textContent = '0';
-        break;
-      case 'exams':
-        updateHeaderTitle(headerTitle, 'Exámenes Disponibles');
-        activityCounter.classList.add('exams');
-        activityCounter.textContent = '0';
-        break;
-      case 'forums':
-        updateHeaderTitle(headerTitle, 'Foros Activos');
-        activityCounter.classList.add('forums');
-        activityCounter.textContent = '0';
-        break;
-    }
-  }
+  // Contadores por pestaña + prefetch en fondo de los tipos aún no cargados
+  try{ __ep_paintTasksTabs(); }catch{}
+  try{ __ep_prefetchTasksCounts(); }catch{}
   
   // Get bearer token from localStorage and load specific content
   const bearerToken = localStorage.getItem("accessToken");
@@ -9434,11 +10522,18 @@ function switchContent(contentType) {
   }
 }
 
+// FIX race pestañas: los loaders async solo pintan si su generación sigue vigente
+// (gen del switch activo) Y la pestaña pedida sigue siendo la visible.
+function __ep_tasksStale(gen, type) {
+  // Normaliza: sin contador (undefined/null) cuenta como 0, no como "siempre stale"
+  const _cur = (window.__ep_tasksGen === undefined || window.__ep_tasksGen === null) ? 0 : window.__ep_tasksGen;
+  return (_cur !== gen) || (currentContentType !== type);
+}
+
 /**
  * Updates header title text
  */
-function updateHeaderTitle(headerTitle, newText) {
-  headerTitle.innerHTML = '<span class="header-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="M9 14l2 2 4-4"/></svg></span> ' + newText;
+function updateHeaderTitle(headerTitle, newText) {  headerTitle.innerHTML = '<span class="header-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="M9 14l2 2 4-4"/></svg></span> ' + newText;
 }
 
 // Dueño del cache: sub/usuario del JWT (null si opaco). Evita pintar datos de otro usuario.
@@ -9461,6 +10556,11 @@ function __ep_tokenUser(tok){
 async function loadActivitiesContent(bearerToken) {
   if (window.__ep_loadingActivities) return;
   window.__ep_loadingActivities = true;
+  // FIX race pestañas: si el usuario ya está en otra pestaña, este loader (directo o
+  // por retry/watchdog) no debe pintar sobre ella. La generación se lee al entrar.
+  if (currentContentType !== 'activities') { window.__ep_loadingActivities = false; return; }
+  const __ep_gen = (window.__ep_tasksGen || 0);
+  const __ep_actsStale = () => __ep_tasksStale(__ep_gen, 'activities');
   try {
     const activitiesList0 = document.querySelector('.acts-list');
     if (!activitiesList0) { console.error('❌ Activities list container not found'); return; }
@@ -9481,6 +10581,7 @@ async function loadActivitiesContent(bearerToken) {
       }
     }catch{}
     const __ep_actsFresh = !!(__ep_cachedActs && __ep_cachedActs.items.length && (Date.now() - (__ep_cachedActs.ts || 0)) < 10 * 60 * 1000);
+    if (__ep_actsStale()) return;
     if (__ep_cachedActs && __ep_cachedActs.items.length) {
       try{ __ep_log('cache HIT n=' + __ep_cachedActs.items.length); }catch{}
       console.log('[EP] tareas: ' + __ep_cachedActs.items.length + ' desde caché' + (__ep_actsFresh ? ', refresh en fondo' : ''));
@@ -9495,7 +10596,18 @@ async function loadActivitiesContent(bearerToken) {
               const freshArr = Array.isArray(fresh) ? fresh : [];
               // nunca sobrescribir cache bueno con vacio
               if(!freshArr.length && __ep_oldCache.items.length){
-                try{ __ep_log('refresh vacio con cache bueno: conserva + retry'); }catch{}
+                // FIX bucle-infinito: el retry era SIN tope — si el fetch sigue vacío
+                // (p. ej. token recién cambiado al volver de un curso) re-entraba cada 6s,
+                // la caché seguía "fresca" y el re-render repetía epCardIn para siempre.
+                // Tope: 3 intentos; se reinicia en cuanto llega data fresca.
+                const _retries = (window.__ep_acts_empty_retries || 0) + 1;
+                window.__ep_acts_empty_retries = _retries;
+                if (_retries > 3) {
+                  try{ __ep_log('refresh vacio persistente (' + _retries + '): rinde y espera'); }catch{}
+                  window.__ep_acts_refreshing = false;
+                  return;
+                }
+                try{ __ep_log('refresh vacio con cache bueno: conserva + retry ' + _retries + '/3'); }catch{}
                 setTimeout(()=>{ try{
                   window.__ep_acts_refreshing = false;
                   const _t3 = localStorage.getItem('accessToken');
@@ -9503,10 +10615,14 @@ async function loadActivitiesContent(bearerToken) {
                 }catch{} }, 6000);
                 return;
               }
+              if(freshArr.length) window.__ep_acts_empty_retries = 0;
               try { await chrome.storage.local.set({ ep_acts_cache_v1: { items: freshArr, ts: Date.now(), user: __ep_tokenUser(bearerToken) } }); } catch {}
+              // Notif instantánea: lista fresca ya en mano → SW (debounce 60s + fingerprint ahí).
+              // ANTES del render: así ep_seen_on_screen_v1 no registra los ids nuevos y no silencia el aviso.
+              try { chrome.runtime.sendMessage({ action: 'epNotifActivitiesFresh', items: freshArr }, () => { void chrome.runtime.lastError; }); } catch {}
               const oldIds = __ep_oldCache.items.map(a => String(a && a.idActividad)).join(',');
               const newIds = freshArr.map(a => String(a && a.idActividad)).join(',');
-              if (oldIds !== newIds && document.querySelector('.acts-list')) { try { await renderActivitiesList(freshArr); } catch {} }
+              if (oldIds !== newIds && !__ep_actsStale() && document.querySelector('.acts-list')) { try { await renderActivitiesList(freshArr); } catch {} }
             } catch {} finally { window.__ep_acts_refreshing = false; }
           })().catch(() => { window.__ep_acts_refreshing = false; });
         }
@@ -9519,6 +10635,10 @@ async function loadActivitiesContent(bearerToken) {
     const activities = await getAllPendingActivities(bearerToken);
     try{ __ep_log('fetch done n=' + (Array.isArray(activities) ? activities.length : -1)); }catch{}
     const actsArr = Array.isArray(activities) ? activities : [];
+    // Notif instantánea: fetch fresco del camino sin caché → SW (antes de cualquier render/retry).
+    if (actsArr.length) {
+      try { chrome.runtime.sendMessage({ action: 'epNotifActivitiesFresh', items: actsArr }, () => { void chrome.runtime.lastError; }); } catch {}
+    }
     // FIX: si el token cambio durante el fetch (refresco silencioso ganado) -> reintenta con el nuevo
     try{
       const _tokNow = localStorage.getItem('accessToken');
@@ -9545,7 +10665,7 @@ async function loadActivitiesContent(bearerToken) {
       }
       window.__ep_emptyRetries = 0;
     }
-    if(actsArr.length){ window.__ep_emptyRetries = 0; window.__ep_emptyOnce = 0; }
+    if(actsArr.length){ window.__ep_emptyRetries = 0; window.__ep_emptyOnce = 0; window.__ep_acts_empty_retries = 0; }
     // FIX: vacio sin cache previo -> UN reintento antes de sentenciar (el token pudo refrescarse)
     if(!actsArr.length && !(__ep_cachedActs && __ep_cachedActs.items.length)){
       window.__ep_emptyOnce = window.__ep_emptyOnce || 0;
@@ -9560,12 +10680,12 @@ async function loadActivitiesContent(bearerToken) {
     try { if(actsArr.length || !(__ep_cachedActs && __ep_cachedActs.items.length)) await chrome.storage.local.set({ ep_acts_cache_v1: { items: actsArr, ts: Date.now(), user: __ep_tokenUser(bearerToken) } }); } catch {}
     let __ep_same = false;
     try { __ep_same = !!(__ep_cachedActs && __ep_cachedActs.items.length && JSON.stringify(__ep_cachedActs.items) === JSON.stringify(actsArr)); } catch {}
-    if (!__ep_same) await renderActivitiesList(actsArr);
+    if (!__ep_same && !__ep_actsStale()) await renderActivitiesList(actsArr);
   } catch (error) {
     console.error('❌ Error loading activities content:', error);
     try {
       const al = document.querySelector('.acts-list');
-      if (al && !al.children.length) al.innerHTML = '<div class="error-message">Error al cargar las tareas</div>';
+      if (al && !al.children.length && !__ep_actsStale()) al.innerHTML = '<div class="error-message">Error al cargar las tareas</div>';
     } catch {}
   } finally { window.__ep_loadingActivities = false; window.__ep_tasksPainted = true; }
 }
@@ -9573,11 +10693,41 @@ async function loadActivitiesContent(bearerToken) {
 // IA bajo demanda: genera el resumen con el worker SOLO al expandir el asistente
 // de la tarea. Al renderizar y en backfill JAMÁS se toca el worker (cuota).
 // El resultado se cachea (ep_ai3_<id>) y no se vuelve a pedir.
+// PRECACHE (excepción acordada): tras pintar, en fondo y de a una, se precachean los
+// resúmenes que faltan de las primeras 8 tareas — así al expandir ya casi siempre está
+// listo y "Generando…" desaparece. Con caché no gasta nada; el tope limita la cuota.
+async function __ep_prefetchSummaries(items){
+  const done = new Set();
+  const pass = async (src) => {
+    const list = (Array.isArray(src)?src:[]).filter(a=>a && a.idActividad && a.descripcionOriginal && String(a.descripcionOriginal).trim())
+      .filter(a=>!done.has(String(a.idActividad))).slice(0, 8);
+    for(const a of list){
+      try{
+        done.add(String(a.idActividad));
+        const c = await chrome.storage.local.get([`ep_ai3_${a.idActividad}`]);
+        const v = c && c[`ep_ai3_${a.idActividad}`];
+        if(v && String(v).trim().length >= 15) continue; // ya cacheada: gratis
+        try{ await getDescription(a.idActividad, a.descripcionOriginal); }catch{}
+        await new Promise(r=>setTimeout(r, 300)); // aire entre llamadas (rate limit 30/min)
+      }catch{}
+    }
+  };
+  try{
+    if(window.__ep_prefetchOn) return;
+    window.__ep_prefetchOn = true;
+    await pass(items);
+    // re-pase único: el backfill pudo rellenar descripcionOriginal mientras corríamos
+    await new Promise(r=>setTimeout(r, 5000));
+    await pass(items);
+  }catch{}
+  finally{ try{ window.__ep_prefetchOn = false; }catch{} }
+}
 async function __ep_lazySummary(activity, cardEl){
   try{
     const miniEl = cardEl.querySelector('[data-ai-mini]');
     if(!miniEl) return;
     if(miniEl.dataset.epDone==='1') return;
+    if(miniEl.dataset.epPending==='1') return;
     const raw = activity.descripcionOriginal || '';
     if(!raw || !String(raw).trim()){
       const fb = (activity.descripcion && activity.descripcion!=='Sin descripción') ? activity.descripcion : 'Sin descripción';
@@ -9585,16 +10735,19 @@ async function __ep_lazySummary(activity, cardEl){
       try{ const sub=cardEl.querySelector('.ai-subtitle-spec'); if(sub) sub.textContent='Toca para expandir'; }catch{}
       return;
     }
-    miniEl.textContent = 'Generando resumen con IA…';
-    let s = '';
-    try{ s = await getDescription(activity.idActividad, raw); }catch{ s=''; }
-    if(!s || /^IA no disponible/i.test(String(s)) || s==='Sin descripción'){
-      miniEl.textContent = s || 'IA no disponible — expande de nuevo para reintentar';
-      return; // sin marcar done: reintenta en la próxima expansión
-    }
-    miniEl.textContent = s; miniEl.dataset.epDone='1';
-    try{ activity.descripcion = s; }catch{}
-    try{ const sub=cardEl.querySelector('.ai-subtitle-spec'); if(sub) sub.textContent='Toca para expandir • Resumen listo'; }catch{}
+    miniEl.dataset.epPending='1';
+    try{
+      miniEl.textContent = 'Generando resumen con IA…';
+      let s = '';
+      try{ s = await getDescription(activity.idActividad, raw); }catch{ s=''; }
+      if(!s || /^IA no disponible/i.test(String(s)) || s==='Sin descripción'){
+        miniEl.textContent = s || 'IA no disponible — expande de nuevo para reintentar';
+        return; // sin marcar done: reintenta en la próxima expansión
+      }
+      miniEl.textContent = s; miniEl.dataset.epDone='1';
+      try{ activity.descripcion = s; }catch{}
+      try{ const sub=cardEl.querySelector('.ai-subtitle-spec'); if(sub) sub.textContent='Toca para expandir • Resumen listo'; }catch{}
+    } finally { try{ delete miniEl.dataset.epPending; }catch{} }
   }catch{}
 }
 // FIX: render separado para reutilizar con caché instantánea (SWR)
@@ -9651,19 +10804,135 @@ async function __ep_descBackfill(items){
   }catch{}
   try{ window.__ep_descBackfillOn = false; }catch{}
 }
+
+// ===== MODOS DE VISTA (plan 678879b6): default / compact / date / compact-date =====
+// Idempotente: toggles ep-view-* en .dues-container y agrupa por fecha (solo 'date'
+// y 'compact-date'). Las clases NO son estrictamente exclusivas: 'compact-date'
+// aplica ep-view-compact + ep-view-date a la vez (fila delgada + separadores).
+// Seguro si no hay contenedor; no anima el widget (re-estilo puro).
+function __ep_applyViewMode() {
+  try {
+    let vm = 'default';
+    try { vm = (loadEpConfig() || {}).viewMode || 'default'; } catch {}
+    // Migración no destructiva: 'simple' ya no existe; se comporta como 'compact-date'.
+    if (vm === 'simple') vm = 'compact-date';
+    document.querySelectorAll('.dues-container').forEach(container => {
+      try {
+        container.classList.toggle('ep-view-compact', vm === 'compact' || vm === 'compact-date');
+        container.classList.toggle('ep-view-date', vm === 'date' || vm === 'compact-date');
+        // Compacta (plan W3): la píldora de días restantes sube al info-row (junto a día y
+        // hora); el footer con el botón "Ver actividad" se oculta por CSS. Se mueve el MISMO
+        // nodo, así conserva sus clases y con ellas los colores de urgencia configurables.
+        const _compactVm = (vm === 'compact' || vm === 'compact-date');
+        container.querySelectorAll('.acts-list .act-item').forEach(item => {
+          try {
+            const info = item.querySelector('.info-row-spec');
+            const footer = item.querySelector('.footer-row-spec');
+            if (!info || !footer) return;
+            if (_compactVm) {
+              const pill = footer.querySelector(':scope > .urgency-pill-spec');
+              if (pill) info.appendChild(pill);
+            } else {
+              const pill = info.querySelector(':scope > .urgency-pill-spec');
+              if (pill) footer.insertBefore(pill, footer.firstChild);
+            }
+          } catch {}
+        });
+        // nunca duplicar separadores: limpiar los existentes primero
+        container.querySelectorAll('.ep-date-sep').forEach(s => s.remove());
+        if (vm !== 'date' && vm !== 'compact-date') return;
+        const list = container.querySelector('.acts-list');
+        if (!list) return;
+        const DAY = 24 * 60 * 60 * 1000;
+        const now = new Date();
+        const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+        const BUCKETS = [
+          { key: 'expired',  label: 'Vencidas' },
+          { key: 'today',    label: 'Hoy' },
+          { key: 'tomorrow', label: 'Mañana' },
+          { key: 'week',     label: 'Esta semana' },
+          { key: 'later',    label: 'Después' }
+        ];
+        const LABELS = {}; BUCKETS.forEach(b => { LABELS[b.key] = b.label; });
+        const items = Array.from(list.querySelectorAll('.act-item')).filter(it => {
+          try { if (getComputedStyle(it).display === 'none') return false; } catch { return false; }
+          return true;
+        });
+        if (!items.length) return;
+        // bucket por item (skip display:none/expirados ocultos); items ya ordenados asc por fecha
+        let hasTs = false;
+        const bucketsOf = items.map(it => {
+          const ts = Number(it.dataset.epDueTs);
+          if (!isFinite(ts)) return 'later';
+          hasTs = true;
+          const d = new Date(ts);
+          const dOnly = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+          const diff = Math.round((dOnly - startToday) / DAY);
+          if (diff < 0) return 'expired';
+          if (diff === 0) return 'today';
+          if (diff === 1) return 'tomorrow';
+          if (diff <= 7) return 'week';
+          return 'later';
+        });
+        if (!hasTs) return;
+        const counts = {};
+        bucketsOf.forEach(b => { counts[b] = (counts[b] || 0) + 1; });
+        let prev = null;
+        items.forEach((it, idx) => {
+          const b = bucketsOf[idx];
+          if (b !== prev) {
+            const sep = document.createElement('div');
+            sep.className = 'ep-date-sep';
+            sep.innerHTML = '<span>' + sanitizeHTML(LABELS[b]) + '</span><em>' + String(counts[b]) + '</em>';
+            it.insertAdjacentElement('beforebegin', sep);
+          }
+          prev = b;
+        });
+      } catch {}
+    });
+  } catch (e) { try { console.warn('[EP] applyViewMode', e); } catch {} }
+}
+
 async function renderActivitiesList(activities) {
   const activitiesList = document.querySelector('.acts-list');
+  const contentBody = document.querySelector('.content-body.ep-skeleton-layer');
+  const skeletonCards = contentBody ? contentBody.querySelector('.skeleton-cards') : null;
   if (!activitiesList) return;
+  // FIX bucle-animacion: si la MISMA lista de tareas ya está pintada (mismos ids+fechas,
+  // tarjetas .act-item.activity visibles y sin skeleton), NO reconstruir el DOM. Los
+  // re-renders repetidos (retry de refresh vacío cada 6s, relanzamiento por skeleton
+  // pegado, login boost) re-reproducían epCardIn y el widget parecía "abrirse" sin fin
+  // al volver de un curso. Solo aplica a la pestaña de tareas (exámenes/foros usan
+  // otras clases y el HTML nuevo debe pintarse siempre).
+  try{
+    const _arr = Array.isArray(activities) ? activities : [];
+    const _fp = _arr.map(a => `${(a && a.idActividad) != null ? a.idActividad : ''}:${a && a.fechaTermino ? String(a.fechaTermino) : ''}`).join('|');
+    const _hasTasks = !!activitiesList.querySelector('.act-item.activity');
+    const _skList = activitiesList.querySelector('.skeleton-cards');
+    const _skVisible = !!((skeletonCards || _skList) && !(skeletonCards || _skList).classList.contains('ep-skeleton-hidden'));
+    if (_fp && window.__ep_acts_fp === _fp && _hasTasks && !_skVisible) {
+      // Mismo contenido ya en pantalla: solo asegura estados derivados y sal.
+      try{ if (skeletonCards) skeletonCards.classList.add('ep-skeleton-hidden'); }catch{}
+      try{ window.__ep_tasksCounts.activities = _arr.length; window.__ep_tasksCounts.loaded.activities = true; __ep_paintTasksTabs(); }catch{}
+      return;
+    }
+    if (_fp) window.__ep_acts_fp = _fp;
+  }catch{}
   try {
     
-    // Clear loading state
+    // Clear loading state (but keep skeleton separate)
     activitiesList.innerHTML = '';
     
     if (activities.length === 0) {
-      activitiesList.innerHTML = getEmptyStateHTML('tasks');
-      const ac0 = document.querySelector('.activity-counter');
-      if (ac0) ac0.textContent = '0';
-      updateEmptyState();
+      try{ window.__ep_tasksCounts.activities = 0; window.__ep_tasksCounts.loaded.activities = true; __ep_paintTasksTabs(); }catch{}
+      // Estado vacío DESPUÉS del fade del skeleton (nunca junto a él)
+      __ep_fillAfterSkeleton(skeletonCards, () => {
+        if (currentContentType !== 'activities') return;
+        activitiesList.innerHTML = getEmptyStateHTML('tasks');
+        updateEmptyState();
+        // Modo vista: asegura ep-view-* incluso en estado vacío (idempotente)
+        try{ __ep_applyViewMode(); }catch{}
+      });
       return;
     }
 
@@ -9679,6 +10948,9 @@ async function renderActivitiesList(activities) {
     if (activityCounter) {
       activityCounter.textContent = activities.length;
     }
+    try{ window.__ep_tasksCounts.activities = activities.length; window.__ep_tasksCounts.loaded.activities = true; __ep_paintTasksTabs(); }catch{}
+    // Oculta el skeleton antes de pintar contenido (no deben verse juntos)
+    try{ if (skeletonCards) skeletonCards.classList.add('ep-skeleton-hidden'); }catch{}
     
     // FIX SISTÉMICO: Render chunked con yield para no freezar después de cargar cursos (30 actividades * innerHTML + AI bloqueaba 800ms)
     for(let _rIdx=0; _rIdx<activities.length; _rIdx++){
@@ -9689,12 +10961,15 @@ async function renderActivitiesList(activities) {
       const activityItem = document.createElement('div');
       const daysLeftInfo = getDaysLeftInfo(activity.fechaTermino);
       activityItem.className = `act-item activity ${daysLeftInfo.urgencyClass}`;
+      // Add stagger delay class
+      activityItem.classList.add(`stagger-${Math.min(_rIdx + 1, 8)}`);
       if (daysLeftInfo.class === 'expired') {
         activityItem.dataset.expired = 'true';
         activityItem.style.display = 'none';
       }
       
       const deadline = new Date(activity.fechaTermino);
+      activityItem.dataset.epDueTs = String(deadline.getTime());
       const dateStr = deadline.toLocaleDateString("es-MX");
       const timeStr = deadline.toLocaleTimeString("es-MX", { hour: '2-digit', minute: '2-digit' });
       
@@ -9707,6 +10982,7 @@ async function renderActivitiesList(activities) {
           <div class="title-row-spec">
             <h3 class="title-spec">${sanitizeHTML(activity.titulo)}</h3>
             <span class="score-pill-spec">${activity.valor || 0} pts</span>
+            <button class="ep-card-bell-btn" type="button" aria-label="Notificar esta tarea" title="Notificar cuando esté por vencer" aria-pressed="false"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg></button>
           </div>
           <div class="info-row-spec">
             <span class="chip-spec"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg> ${dateStr}</span>
@@ -9743,10 +11019,56 @@ async function renderActivitiesList(activities) {
       // Add click event to the view button — premium con spring Apple
       const viewBtn = activityItem.querySelector('.view-activity-btn');
       viewBtn.addEventListener('click', () => navigateToActivity(activity.idCurso, activity.idActividad));
+      // Campana por tarjeta: opt-in de avisos SOLO para esta tarea (mapa ep_notif_tasks_v1)
+      const cardBell = activityItem.querySelector('.ep-card-bell-btn');
+      if (cardBell) {
+        const taskId = String(activity.idActividad);
+        const syncBell = () => {
+          try {
+            const on = !!__ep_notifTasksRead()[taskId];
+            cardBell.classList.toggle('active', on);
+            cardBell.setAttribute('aria-pressed', on ? 'true' : 'false');
+          } catch {}
+        };
+        syncBell();
+        cardBell.addEventListener('click', (e) => {
+          e.preventDefault(); e.stopPropagation();
+          if (!__ep_toggleGuard(cardBell)) return;
+          try {
+            const map = __ep_notifTasksRead();
+            const enabling = !map[taskId];
+            if (enabling) map[taskId] = true; else delete map[taskId];
+            __ep_notifTasksWrite(map);
+            syncBell();
+            try { navigator.vibrate?.(10); } catch {}
+            try { __ep_epnToastBell(enabling); } catch {}
+            // Al encender: check inmediato para avisar umbrales ya cruzados (sin esperar 30 min)
+            if (enabling) try { chrome.runtime.sendMessage({ action: 'epNotifCheck' }, () => { void chrome.runtime.lastError; }); } catch {}
+          } catch {}
+        });
+      }
+      // Compacta: sin botón Ver actividad — la tarjeta completa abre la actividad
+      activityItem.addEventListener('click', (e) => {
+        if (e.target.closest('button, a, input, .ai-section-spec')) return;
+        let vm = 'default';
+        try { vm = (loadEpConfig() || {}).viewMode || 'default'; } catch {}
+        if (vm === 'compact' || vm === 'compact-date') {
+          e.preventDefault(); e.stopPropagation();
+          try { navigator.vibrate?.(8); } catch {}
+          navigateToActivity(activity.idCurso, activity.idActividad);
+        }
+      });
       // AI colapsable — Apple spring, mini descripción visible al expandir
       const aiSection = activityItem.querySelector('.ai-section-spec');
       const aiHeader = activityItem.querySelector('.ai-header-spec');
       if (aiHeader) {
+        // Arranque anticipado: pointerdown dispara la generación ~100-150 ms antes que
+        // click (ratón y tap). El guard epPending dentro de __ep_lazySummary evita duplicados.
+        aiHeader.addEventListener('pointerdown', () => {
+          try{ const me=activityItem.querySelector('[data-ai-mini]');
+            if(me && me.dataset.epDone!=='1') __ep_lazySummary(activity, activityItem);
+          }catch{}
+        }, { passive: true });
         aiHeader.addEventListener('click', () => {
           const isCollapsed = aiSection.classList.contains('is-collapsed');
           // Apple: anima desde valor actual, sin salto
@@ -9860,9 +11182,23 @@ async function renderActivitiesList(activities) {
     }
     // Asegura vacío visible si todo quedó oculto (fix 0 sin nada)
     updateEmptyState();
+    // Modo vista: aplica ep-view-* / agrupa por fecha tras el render de la lista
+    try{ __ep_applyViewMode(); }catch{}
     try{ __ep_perfMark('data'); }catch{}
+    
+    // Cross-fade: hide skeleton, show content with stagger
+    if (skeletonCards) {
+      // Force a reflow to ensure the transition works
+      skeletonCards.offsetHeight;
+      skeletonCards.classList.add('ep-skeleton-hidden');
+    }
+    // Trigger stagger animation on content items
+    activitiesList.classList.add('animate-in');
+    
     // Backfill diferido: descripciones faltantes (detalle + IA) sin bloquear; parchea tarjetas
     try{ __ep_descBackfill(activities); }catch{}
+    // Precache de resúmenes en fondo (tope 8): al expandir ya suele estar listo
+    try{ __ep_prefetchSummaries(activities); }catch{}
     // Populate subject filter after activities are rendered
     setTimeout(() => {
       populateSubjectFilter();
@@ -9873,6 +11209,7 @@ async function renderActivitiesList(activities) {
     
   } catch (e) {
     console.error('❌ Error renderizando tareas:', e);
+    try { if (skeletonCards) skeletonCards.classList.add('ep-skeleton-hidden'); } catch {}
     try {
       if (activitiesList && !activitiesList.children.length) activitiesList.innerHTML = '<div class="error-message">Error al cargar las tareas</div>';
     } catch {}
@@ -9883,10 +11220,14 @@ async function renderActivitiesList(activities) {
  * Loads exams content independently
  */
 async function loadExamsContent(bearerToken) {
+  const __ep_gen = (window.__ep_tasksGen || 0);
+  const __ep_examsStale = () => __ep_tasksStale(__ep_gen, 'exams');
   try {
     console.log('ðŸŽ¯ Loading exams content...');
     const activitiesList = document.querySelector('.acts-list');
-    
+    const contentBody = document.querySelector('.content-body.ep-skeleton-layer');
+    const skeletonCards = contentBody ? contentBody.querySelector('.skeleton-cards') : null;
+
     if (!activitiesList) {
       console.error('❌ Activities list container not found');
       return;
@@ -9948,14 +11289,18 @@ async function loadExamsContent(bearerToken) {
       }
     }
     
-    // Clear loading state
+    // Clear loading state (but keep skeleton separate)
+    if (__ep_examsStale()) return;
     activitiesList.innerHTML = '';
-    
+
     if (allExams.length === 0) {
-      activitiesList.innerHTML = getEmptyStateHTML('exams');
-      const ac0 = document.querySelector('.activity-counter');
-      if (ac0) ac0.textContent = '0';
-      updateEmptyState();
+      try{ window.__ep_tasksCounts.exams = 0; window.__ep_tasksCounts.loaded.exams = true; __ep_paintTasksTabs(); }catch{}
+      // Estado vacío DESPUÉS del fade del skeleton (nunca junto a él)
+      __ep_fillAfterSkeleton(skeletonCards, () => {
+        if (__ep_examsStale()) return;
+        activitiesList.innerHTML = getEmptyStateHTML('exams');
+        updateEmptyState();
+      });
       return;
     }
 
@@ -9971,43 +11316,48 @@ async function loadExamsContent(bearerToken) {
     if (activityCounter) {
       activityCounter.textContent = allExams.length;
     }
-    
+    try{ window.__ep_tasksCounts.exams = allExams.length; window.__ep_tasksCounts.loaded.exams = true; __ep_paintTasksTabs(); }catch{}
+    // FIX race: si el usuario cambió de pestaña durante los fetchs, no pintar nada aquí
+    if (__ep_examsStale()) return;
+    // Oculta el skeleton antes de pintar contenido (no deben verse juntos)
+    try{ if (skeletonCards) skeletonCards.classList.add('ep-skeleton-hidden'); }catch{}
+
     // Render each exam
-    allExams.forEach(exam => {
+    allExams.forEach((exam, idx) => {
       const examItem = document.createElement('div');
       examItem.className = 'act-item exam';
+      // Add stagger delay class
+      examItem.classList.add(`stagger-${Math.min(idx + 1, 8)}`);
       
       const startDate = exam.fechaInicio ? new Date(exam.fechaInicio) : null;
       const endDate = exam.fechaTermino ? new Date(exam.fechaTermino) : null;
       const endDateStr = endDate ? endDate.toLocaleDateString("es-MX") : 'No definida';
       const endTimeStr = endDate ? endDate.toLocaleTimeString("es-MX", { hour: '2-digit', minute: '2-digit' }) : '';
+      const startDateStr = startDate ? startDate.toLocaleDateString("es-MX") : null;
       const daysLeftInfo = endDate ? getDaysLeftInfo(exam.fechaTermino) : null;
       
       if (daysLeftInfo && daysLeftInfo.class === 'expired') {
         examItem.dataset.expired = 'true';
         examItem.style.display = 'none';
       }
+      // Modo vista por fecha: agrupación necesita data-ep-due-ts (igual que tareas)
+      if (endDate) examItem.dataset.epDueTs = String(endDate.getTime());
       
+      // SPEC v1.0: misma estructura spec que las tarjetas de tareas
       examItem.innerHTML = `
-        <div class="d-flex flex-column">
-          <div class="activity-header d-flex justify-content-between align-items-center">
-            <h6 class="font-weight-bold mb-0 text-danger">
-              ${exam.courseName}
-            </h6>
+        <div class="card-body-spec">
+          <div class="course-name-spec">${sanitizeHTML(exam.courseName || 'Curso').toUpperCase()}</div>
+          <div class="title-row-spec">
+            <h3 class="title-spec">${sanitizeHTML(exam.nombre || exam.titulo || 'Examen')}</h3>
           </div>
-          <p class="activity-title">${exam.nombre || exam.titulo}</p>
-          <div class="activity-date-time">
-            <span class="activity-date">${endDateStr}</span>
-            ${endTimeStr ? `<span class="activity-time">${endTimeStr}</span>` : ''}
+          <div class="info-row-spec">
+            ${startDateStr ? `<span class="chip-spec"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20h16M6 16s1.5-2 6-2 6 2 6 2"/><circle cx="12" cy="8" r="4"/></svg> Inicio: ${startDateStr}</span>` : ''}
+            <span class="chip-spec"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg> ${endDateStr}</span>
+            ${endTimeStr ? `<span class="chip-spec"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg> ${endTimeStr}</span>` : ''}
           </div>
-          <div class="activity-footer">
-            <div class="d-flex justify-content-between align-items-center">
-              <small class="text-muted">Inicio: ${startDate ? startDate.toLocaleDateString("es-MX") : 'No definida'}</small>
-              <button class="btn btn-danger btn-sm view-exam-btn">
-                Ver
-              </button>
-            </div>
-            ${daysLeftInfo ? `<div class="d-flex justify-content-start"><span class="activity-days-left ${daysLeftInfo.class}">${daysLeftInfo.text}</span></div>` : ''}
+          <div class="footer-row-spec">
+            ${daysLeftInfo ? `<span class="urgency-pill-spec"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg><span class="pill-label">${daysLeftInfo.text}</span></span>` : ''}
+            <button class="btn-solid-spec view-activity-btn view-exam-btn"><span class="btn-label">Ver examen</span><span class="btn-chevron"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M9 18l6-6-6-6"/></svg></span></button>
           </div>
         </div>
       `;
@@ -10024,6 +11374,18 @@ async function loadExamsContent(bearerToken) {
 
     console.log(`✅ Loaded ${allExams.length} relevant exams from active courses`);
     
+    // Cross-fade: hide skeleton, show content with stagger
+    if (skeletonCards) {
+      // Force a reflow to ensure the transition works
+      skeletonCards.offsetHeight;
+      skeletonCards.classList.add('ep-skeleton-hidden');
+    }
+    // Trigger stagger animation on content items
+    activitiesList.classList.add('animate-in');
+    
+    // Modo vista: aplica ep-view-* / agrupa por fecha tras el render de la lista
+    try{ __ep_applyViewMode(); }catch{}
+    
     // Re-initialize filters for exams
     setTimeout(() => {
       populateSubjectFilter();
@@ -10031,6 +11393,8 @@ async function loadExamsContent(bearerToken) {
     }, 100);
   } catch (error) {
     console.error('❌ Error loading exams content:', error);
+    if (__ep_examsStale()) return;
+    try { if (skeletonCards) skeletonCards.classList.add('ep-skeleton-hidden'); } catch {}
     const activitiesList = document.querySelector('.acts-list');
     if (activitiesList) {
       activitiesList.innerHTML = '<div class="error-message">Error al cargar los exámenes</div>';
@@ -10042,10 +11406,14 @@ async function loadExamsContent(bearerToken) {
  * Loads forums content independently
  */
 async function loadForumsContent(bearerToken) {
+  const __ep_gen = (window.__ep_tasksGen || 0);
+  const __ep_forumsStale = () => __ep_tasksStale(__ep_gen, 'forums');
   try {
     console.log('ðŸŽ¯ Loading forums content...');
     const activitiesList = document.querySelector('.acts-list');
-    
+    const contentBody = document.querySelector('.content-body.ep-skeleton-layer');
+    const skeletonCards = contentBody ? contentBody.querySelector('.skeleton-cards') : null;
+
     if (!activitiesList) {
       console.error('❌ Activities list container not found');
       return;
@@ -10112,14 +11480,18 @@ async function loadForumsContent(bearerToken) {
       }
     }
     
-    // Clear loading state
+    // Clear loading state (but keep skeleton separate)
+    if (__ep_forumsStale()) return;
     activitiesList.innerHTML = '';
-    
+
     if (allForums.length === 0) {
-      activitiesList.innerHTML = getEmptyStateHTML('forums');
-      const ac0 = document.querySelector('.activity-counter');
-      if (ac0) ac0.textContent = '0';
-      updateEmptyState();
+      try{ window.__ep_tasksCounts.forums = 0; window.__ep_tasksCounts.loaded.forums = true; __ep_paintTasksTabs(); }catch{}
+      // Estado vacío DESPUÉS del fade del skeleton (nunca junto a él)
+      __ep_fillAfterSkeleton(skeletonCards, () => {
+        if (__ep_forumsStale()) return;
+        activitiesList.innerHTML = getEmptyStateHTML('forums');
+        updateEmptyState();
+      });
       return;
     }
 
@@ -10135,12 +11507,19 @@ async function loadForumsContent(bearerToken) {
     if (activityCounter) {
       activityCounter.textContent = allForums.length;
     }
-    
+    try{ window.__ep_tasksCounts.forums = allForums.length; window.__ep_tasksCounts.loaded.forums = true; __ep_paintTasksTabs(); }catch{}
+    // FIX race: si el usuario cambió de pestaña durante los fetchs, no pintar nada aquí
+    if (__ep_forumsStale()) return;
+    // Oculta el skeleton antes de pintar contenido (no deben verse juntos)
+    try{ if (skeletonCards) skeletonCards.classList.add('ep-skeleton-hidden'); }catch{}
+
     // Render each forum
-    allForums.forEach(forum => {
+    allForums.forEach((forum, idx) => {
       const forumItem = document.createElement('div');
       const forumUrgencyInfo = forum.fechaTermino ? getDaysLeftInfo(forum.fechaTermino) : getForumUrgencyInfo(forum.fechaInicio);
       forumItem.className = `act-item forum ${forumUrgencyInfo.urgencyClass}`;
+      // Add stagger delay class
+      forumItem.classList.add(`stagger-${Math.min(idx + 1, 8)}`);
       
       if (forumUrgencyInfo.class === 'expired') {
         forumItem.dataset.expired = 'true';
@@ -10152,26 +11531,25 @@ async function loadForumsContent(bearerToken) {
       const endDateStr = endDate ? endDate.toLocaleDateString("es-MX") : 'No definida';
       const endTimeStr = endDate ? endDate.toLocaleTimeString("es-MX", { hour: '2-digit', minute: '2-digit' }) : '';
       
+      // Modo vista por fecha: agrupación necesita data-ep-due-ts (igual que tareas)
+      if (endDate) forumItem.dataset.epDueTs = String(endDate.getTime());
+      
+      // SPEC v1.0: misma estructura spec que las tarjetas de tareas
       forumItem.innerHTML = `
-        <div class="d-flex flex-column">
-          <div class="activity-header d-flex justify-content-between align-items-center">
-            <h6 class="font-weight-bold mb-0 text-success">
-              ${forum.courseName}
-            </h6>
+        <div class="card-body-spec">
+          <div class="course-name-spec">${sanitizeHTML(forum.courseName || 'Curso').toUpperCase()}</div>
+          <div class="title-row-spec">
+            <h3 class="title-spec">${sanitizeHTML(forum.titulo)}</h3>
           </div>
-          <p class="activity-title">${forum.titulo}</p>
-          <div class="forum-stats">
-            <small class="text-muted">Comentarios: ${forum.totalComentarios || 0} | Nuevos: ${forum.nuevosComentarios || 0}</small>
+          <div class="info-row-spec">
+            <span class="chip-spec chip-forum-date"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg> ${endDateStr}</span>
+            ${endTimeStr ? `<span class="chip-spec chip-forum-time"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg> ${endTimeStr}</span>` : ''}
+            <span class="chip-spec chip-forum-com"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg> ${forum.totalComentarios || 0} comentarios</span>
+            <span class="chip-spec chip-forum-new"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.7 4.3L18 9l-4.3 1.7L12 15l-1.7-4.3L6 9l4.3-1.7z"/></svg> ${forum.nuevosComentarios || 0} nuevos</span>
           </div>
-          <div class="activity-date-time">
-            <span class="activity-date">${endDateStr}</span>
-            ${endTimeStr ? `<span class="activity-time">${endTimeStr}</span>` : ''}
-          </div>
-          <div class="activity-footer d-flex justify-content-between align-items-center">
-            <span class="activity-days-left ${forumUrgencyInfo.class}">${forumUrgencyInfo.text}</span>
-            <button class="btn btn-success btn-sm view-forum-btn">
-              Ver
-            </button>
+          <div class="footer-row-spec">
+            <span class="urgency-pill-spec"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg><span class="pill-label">${forumUrgencyInfo.text}</span></span>
+            <button class="btn-solid-spec view-activity-btn view-forum-btn"><span class="btn-label">Ver foro</span><span class="btn-chevron"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M9 18l6-6-6-6"/></svg></span></button>
           </div>
         </div>
       `;
@@ -10182,11 +11560,34 @@ async function loadForumsContent(bearerToken) {
         console.log(`ðŸŽ¯ Navigating to forum: courseId=${forum.courseId}, forumId=${forum.idForo || forum.foroId}`);
         navigateToForum(forum.courseId, forum.idForo || forum.foroId);
       });
-      
+      // Compacta: sin botón Ver foro (footer oculto) — la tarjeta completa abre el foro
+      forumItem.addEventListener('click', (e) => {
+        if (e.target.closest('button, a, input')) return;
+        let vm = 'default';
+        try { vm = (loadEpConfig() || {}).viewMode || 'default'; } catch {}
+        if (vm === 'compact' || vm === 'compact-date') {
+          e.preventDefault(); e.stopPropagation();
+          try { navigator.vibrate?.(8); } catch {}
+          navigateToForum(forum.courseId, forum.idForo || forum.foroId);
+        }
+      });
+
       activitiesList.appendChild(forumItem);
     });
 
     console.log(`✅ Loaded ${allForums.length} relevant forums from active courses`);
+    
+    // Cross-fade: hide skeleton, show content with stagger
+    if (skeletonCards) {
+      // Force a reflow to ensure the transition works
+      skeletonCards.offsetHeight;
+      skeletonCards.classList.add('ep-skeleton-hidden');
+    }
+    // Trigger stagger animation on content items
+    activitiesList.classList.add('animate-in');
+    
+    // Modo vista: aplica ep-view-* / agrupa por fecha tras el render de la lista
+    try{ __ep_applyViewMode(); }catch{}
     
     // Re-initialize filters for forums
     setTimeout(() => {
@@ -10195,6 +11596,8 @@ async function loadForumsContent(bearerToken) {
     }, 100);
   } catch (error) {
     console.error('❌ Error loading forums content:', error);
+    if (__ep_forumsStale()) return;
+    try { if (skeletonCards) skeletonCards.classList.add('ep-skeleton-hidden'); } catch {}
     const activitiesList = document.querySelector('.acts-list');
     if (activitiesList) {
       activitiesList.innerHTML = '<div class="error-message">Error al cargar los foros</div>';
@@ -10215,7 +11618,11 @@ function ensureWidgetVisible() {
   try { localStorage.removeItem('ep_widget_hidden'); } catch {}
   const w = document.querySelector('.ep-wrapper');
   const d = document.querySelector('.dues-container');
-  if (d) d.classList.remove('ep-hidden');
+  if (d) {
+    // Keep the fluid enter animation: a bare class removal would pop the
+    // widget in without any transition.
+    try { showWidget(d, 'tasks'); } catch { d.classList.remove('ep-hidden'); }
+  }
   if (w) w.classList.remove('ep-collapsed');
   const t = document.querySelector('button.button_arrow_down') || document.querySelector('.ep-widget-toggle');
   if (t) { t.classList.add('ep-active'); t.title = 'Ocultar widget'; }
@@ -10258,7 +11665,7 @@ function getActiveWidget() {
 function setActiveWidget(type) {
   try { localStorage.setItem('ep_active_widget', type); } catch {}
 }
-function hideAllWidgets() {
+async function hideAllWidgets(opts) {
   const isCfgVisible = (function(){ const w=document.querySelector('.ep-config-widget'); return !!(w && w.style.display!=='none' && !w.classList.contains('ep-hidden')); })();
   const isCfgActive = (function(){ try{return localStorage.getItem('ep_active_widget')==='config'}catch{return false} })();
   if((isCfgActive || isCfgVisible) && !window.__ep_allow_hide_config && !__ep_isUserAction()){
@@ -10268,12 +11675,42 @@ function hideAllWidgets() {
     console.log('[EP] hideAllWidgets bloqueado — config activo, requiere X o cambio widget');
     return;
   }
+  // Cleanup drag listeners for dues-container
+  const duesContainer = document.querySelector('.dues-container');
+  if (duesContainer && duesContainer.__ep_dragCleanup) {
+    try { duesContainer.__ep_dragCleanup(); } catch {}
+    duesContainer.__ep_dragCleanup = null;
+  }
+  // FIX leak: en la salida animada nunca se arrastra un guard instantáneo viejo
+  if (!(opts && opts.instant)) {
+    try { document.querySelectorAll('.ep-instant').forEach(function (el) { el.classList.remove('ep-instant'); }); } catch {}
+  }
   const stack = document.querySelector('.ep-right-stack');
+  // NOTE: the stack is NOT collapsed here. Switching it to `ep-state-hidden`
+  // hides the whole column at once and would mask the per-widget exit
+  // animation, so the state changes after the exits have played out.
+
+  // Hide all widgets with animation
+  const widgetMap = [
+    { el: document.querySelector('.dues-container'), type: 'tasks' },
+    { el: document.querySelector('.ep-schedule-widget'), type: 'schedule' },
+    { el: document.querySelector('.ep-mail-widget'), type: 'mail' },
+    { el: document.querySelector('.ep-miuv-widget'), type: 'miuv' },
+    { el: document.querySelector('.ep-config-widget'), type: 'config' }
+  ];
+
+  const hidePromises = widgetMap
+    .filter(({ el }) => el)
+    .map(({ el, type }) => hideWidget(el, type, opts));
+
+  await Promise.all(hidePromises);
+
+  // Now the column can collapse
   if (stack) {
     stack.classList.remove('ep-state-tasks', 'ep-state-schedule', 'ep-state-mail', 'ep-state-miuv', 'ep-state-config');
     stack.classList.add('ep-state-hidden');
   }
-  document.querySelectorAll('.dues-container, .ep-schedule-widget, .ep-mail-widget, .ep-miuv-widget, .ep-config-widget').forEach(el => el.classList.add('ep-hidden'));
+
   document.querySelectorAll('.ep-tasks-btn, .ep-schedule-btn, .ep-mail-btn, .ep-miuv-btn, .ep-config-btn').forEach(b => {
     b.classList.remove('active', 'ep-active');
     b.style.background = '';
@@ -10281,6 +11718,15 @@ function hideAllWidgets() {
   try { localStorage.setItem('ep_active_widget', 'hidden'); } catch {}
   const wrapper = document.querySelector('.ep-wrapper');
   if (wrapper) wrapper.classList.add('ep-collapsed');
+  // FIX instant: el colapso del stack en restore ({instant:true}) NO anima —
+  // guard de 2 frames (transition:none !important) justo en el flip de estado.
+  if (opts && opts.instant) {
+    const _guards = [stack, wrapper].filter(Boolean);
+    _guards.forEach(function (el) { try { el.classList.add('ep-instant'); } catch {} });
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      _guards.forEach(function (el) { try { el.classList.remove('ep-instant'); } catch {} });
+    }));
+  }
   try { __ep_btnIndicatorSync(null); } catch {}
   // FIX: en list restaura el layout AL INSTANTE (sin esperar el poll de 3s que dejaba el hueco)
   try {
@@ -10294,12 +11740,18 @@ function getOrCreateScheduleWidget(force) {
   const stack = ensureRightStack();
   if (!stack) return null;
   let w = stack.querySelector('.ep-schedule-widget');
+  // FIX reload-instant: el widget puede existir en OTRO stack (shell fijo del mount temprano
+  // vs panel lateral). Mover el MISMO nodo conserva su contenido cargado y listeners; crear
+  // uno nuevo duplicaba y __epCleanupWidgetDuplicates podía quedarse con el VACÍO (cargando eterno).
+  if (!w) { try { const _any = document.querySelector('.ep-schedule-widget'); if (_any) { stack.appendChild(_any); w = _any; } } catch {} }
   // FIX: si el shell ya existe (abierto a mano en list), devuélvelo — el guard solo bloquea CREAR
   if (w) return w;
   if(!force && location.pathname.includes('/page/course/list')) return null;
   w = document.createElement('div');
   w.className = 'ep-schedule-widget ep-hidden';
-    w.innerHTML = `
+  // FIX dark: nace con ep-dark si el modo oscuro ya está activo
+  try{ if(loadEpConfig().dark) w.classList.add('ep-dark'); }catch{}
+  w.innerHTML = `
     <div class="ep-schedule-widget-header">
       <h4 class="ep-schedule-widget-title">Mi Horario</h4>
       <span class="ep-schedule-widget-count">—</span>
@@ -10316,18 +11768,22 @@ function getOrCreateScheduleWidget(force) {
     </div>
   `;
   stack.appendChild(w);
-  w.addEventListener('dblclick', (e) => { if (!e.target.closest('.ep-schedule-widget-header')) return; e.preventDefault(); try{ console.log('[EP] horario ocultado por doble-click'); }catch{} hideAllWidgets(); });
+  w.addEventListener('dblclick', async (e) => { if (!e.target.closest('.ep-schedule-widget-header')) return; e.preventDefault(); try{ console.log('[EP] horario ocultado por doble-click'); }catch{} await hideAllWidgets(); });
   return w;
 }
 function getOrCreateMailWidget(force) {
   const stack = ensureRightStack();
   if (!stack) return null;
   let w = stack.querySelector('.ep-mail-widget');
+  // FIX reload-instant: mismo merge que horario — mover el nodo con contenido, no duplicar
+  if (!w) { try { const _any = document.querySelector('.ep-mail-widget'); if (_any) { stack.appendChild(_any); w = _any; } } catch {} }
   // FIX: si el shell ya existe (abierto a mano en list), devuélvelo — el guard solo bloquea CREAR
   if (w) return w;
   if(!force && location.pathname.includes('/page/course/list')) return null;
   w = document.createElement('div');
   w.className = 'ep-mail-widget ep-hidden';
+  // FIX dark: nace con ep-dark si el modo oscuro ya está activo
+  try{ if(loadEpConfig().dark) w.classList.add('ep-dark'); }catch{}
   w.innerHTML = `
     <div class="ep-mail-widget-header">
       <h4 class="ep-mail-widget-title">Mensajes</h4>
@@ -10341,7 +11797,7 @@ function getOrCreateMailWidget(force) {
      </div>
    `;
   stack.appendChild(w);
-  w.addEventListener('dblclick', (e) => { if (!e.target.closest('.ep-mail-widget-header')) return; e.preventDefault(); try{ console.log('[EP] correo ocultado por doble-click'); }catch{} hideAllWidgets(); });
+  w.addEventListener('dblclick', async (e) => { if (!e.target.closest('.ep-mail-widget-header')) return; e.preventDefault(); try{ console.log('[EP] correo ocultado por doble-click'); }catch{} await hideAllWidgets(); });
   return w;
 }
 // FIX SISTÉMICO: Widget MiUV (Calificaciones + Avance + Exámenes) — mismo patrón que horario (sin login extra)
@@ -10351,6 +11807,8 @@ function getOrCreateMiuvWidget(force) {
   const stack = ensureRightStack();
   if (!stack) return null;
   let w = stack.querySelector('.ep-miuv-widget');
+  // FIX reload-instant: mismo merge que horario/mail — mover el nodo con contenido, no duplicar
+  if (!w) { try { const _any = document.querySelector('.ep-miuv-widget'); if (_any) { stack.appendChild(_any); w = _any; } } catch {} }
   if (w) {
     // FIX: versiones viejas podian traer el engrane de config aca - se elimina si existe
     try{
@@ -10363,6 +11821,9 @@ function getOrCreateMiuvWidget(force) {
   }
   w = document.createElement('div');
   w.className = 'ep-miuv-widget ep-hidden';
+  // FIX dark: si el modo oscuro ya está activo, el widget nace con ep-dark
+  // (sin esperar al backstop de 15s de applyEpConfig)
+  try{ if(loadEpConfig().dark) w.classList.add('ep-dark'); }catch{}
   w.innerHTML = `
     <div class="ep-miuv-widget-header">
       <h4 class="ep-miuv-widget-title">MiUV</h4>
@@ -10379,7 +11840,7 @@ function getOrCreateMiuvWidget(force) {
     </div>
   `;
   stack.appendChild(w);
-  w.addEventListener('dblclick', (e) => { if(e.target.closest('#ep-config-open')) return; e.preventDefault(); hideAllWidgets(); });
+  w.addEventListener('dblclick', async (e) => { if(e.target.closest('#ep-config-open')) return; e.preventDefault(); await hideAllWidgets(); });
   // Tabs handler — cambia sección sin recargar
   w.querySelectorAll('.ep-miuv-tab').forEach(btn => {
     btn.addEventListener('click', (e) => {
@@ -10404,7 +11865,9 @@ function getOrCreateMiuvWidget(force) {
   return w;
 }
 function toggleMiuvWidget() {
+  __ep_prePromoteSheet('miuv'); // FIX MAIL-PERF GPU: promoción pre-animación
   try{ __ep_markUserAction(); }catch{}
+  try{ __epCleanupWidgetDuplicates(); }catch{}
   const cur = getActiveWidget();
   if (cur === 'miuv') {
     applyExclusiveWidget('tasks');
@@ -10441,7 +11904,7 @@ function __ep_restoreActive() {
     // FIX default abierto: sin preferencia guardada (login fresco/instalación), abre tareas.
     // Solo 'hidden' explícito (cerrado a mano/doble-click) se respeta.
     if (!act) { act = 'tasks'; try{ localStorage.setItem('ep_active_widget','tasks'); }catch{} }
-    if (act === 'hidden') { try { hideAllWidgets(); } catch {} return; }
+    if (act === 'hidden') { try { hideAllWidgets({ instant: true }); } catch {} return; }
     // FIX anti-doble-restore: ignora el mismo widget si ya se restauró hace <1.5s
     // (eran los restore +882/+888 duplicados). Otro widget distinto siempre pasa.
     try{
@@ -10449,7 +11912,9 @@ function __ep_restoreActive() {
       if(window.__ep_restore_lastAct === act && (_nowR - (window.__ep_restore_lastT || 0)) < 1500) return;
       window.__ep_restore_lastAct = act; window.__ep_restore_lastT = _nowR;
     }catch{}
-    applyExclusiveWidget(act);
+    // FIX CAUSE A: el restore/init/corrección muestra al INSTANTE (sin animación
+    // que se re-playee en cada carga o navegación SPA)
+    applyExclusiveWidget(act, { instant: true });
     try { if (window.__ep_t0) console.log('[EP] restore +' + Math.round(performance.now() - window.__ep_t0) + 'ms widget=' + act); } catch {}
     setTimeout(() => {
       try {
@@ -10458,14 +11923,43 @@ function __ep_restoreActive() {
         else if (act === 'miuv') { const w = document.querySelector('.ep-miuv-widget'); if (w && !w.dataset.gradesLoaded && !w.dataset.avanceLoaded && !w.dataset.examsLoaded) { let t='grades'; try{ t=localStorage.getItem('ep_miuv_tab')||'grades'; }catch{} if(t==='avance') loadMiuvAvance(); else if(t==='exams') loadMiuvExams(); else loadMiuvGrades(); } }
         else if (act === 'config') { const w = document.querySelector('.ep-config-widget'); if (w) renderEpConfigSections(w); }
       } catch {}
+      // FIX reload-instant watchdog: si el cuerpo del widget sigue en skeleton/loader a los
+      // 4s (loader abortado, duplicado vacío ganó la limpieza, fetch colgado), reintenta —
+      // los loaders son idempotentes y su SWR pinta caché al instante.
+      try {
+        setTimeout(() => {
+          const _stuck = (w, sel) => !!w && !!w.querySelector(sel);
+          if (act === 'schedule') { const w = document.querySelector('.ep-schedule-widget'); if (w && (!w.dataset.loaded || _stuck(w, '.ep-schedule-widget-body .loader-div, .ep-schedule-widget-body .ep-schedule-skeleton'))) loadScheduleIndependent(); }
+          else if (act === 'mail') { const w = document.querySelector('.ep-mail-widget'); const tok = localStorage.getItem('accessToken'); if (w && tok && (!w.dataset.loaded || _stuck(w, '.ep-mail-widget-body .loader-div, .ep-mail-widget-body .skeleton-cards'))) loadMailIndependent(tok); }
+          else if (act === 'miuv') { const w = document.querySelector('.ep-miuv-widget'); if (w) { const sec = w.querySelector('[data-miuv-section].active'); if (sec && sec.querySelector('.loader-div')) { let t='grades'; try{ t=localStorage.getItem('ep_miuv_tab')||'grades'; }catch{} if(t==='avance') loadMiuvAvance(); else if(t==='exams') loadMiuvExams(); else loadMiuvGrades(); } } }
+          else if (act === 'config') { const w = document.querySelector('.ep-config-widget'); if (w && !w.querySelector('.ep-config-section.active').children.length) renderEpConfigSections(w); }
+        }, 4000);
+      } catch {}
     }, 60);
   } catch {}
+}
+// FIX reload-instant: en el mount temprano SOLO existía el widget de tareas; mail/schedule/
+// miuv/config no se creaban hasta que Angular asentaba (waitForListContent/waitForNotifContainer),
+// así la restauración no mostraba nada y el contenido (aun con caché) aparecía tarde.
+// Crea YA el widget del tipo activo: restore lo muestra al instante y su loader pinta caché de inmediato.
+function __ep_earlyCreateWidget(act) {
+  try{
+    if (act === 'mail') getOrCreateMailWidget(true);
+    else if (act === 'schedule') getOrCreateScheduleWidget(true);
+    else if (act === 'miuv') getOrCreateMiuvWidget(true);
+    else if (act === 'config') {
+      const _w = getOrCreateConfigWidget();
+      try{ __ep_log('earlyCreate config →', _w ? 'ok' : 'NULL (sin wrapper/stack)'); }catch{}
+    }
+  }catch(e){ try{ __ep_log('earlyCreate ' + act + ' ERROR', String(e && e.message || e)); }catch{} }
 }
 function getOrCreateConfigWidget(){
   const stack = ensureRightStack();
   if(!stack) return null;
   // FIX: si ya existe, actualiza y retorna (no duplica)
   let w = stack.querySelector('.ep-config-widget');
+  // FIX reload-instant: mismo merge que horario/mail/miuv — mover el nodo con contenido, no duplicar
+  if(!w){ try { const _any = document.querySelector('.ep-config-widget'); if (_any) { stack.appendChild(_any); w = _any; } } catch {} }
   if(w){
     // asegura que siga siendo widget (no modal) y con handler vigente
     w.style.position='absolute'; w.style.inset='0'; w.style.zIndex='5';
@@ -10479,20 +11973,23 @@ function getOrCreateConfigWidget(){
   w.className = 'ep-config-widget ep-hidden';
   // FIX SISTÉMICO: como widget absoluto que cubre el stack, no se cierra por hideAllWidgets/persistentCheck
   w.style.cssText = 'position:absolute; inset:0; z-index:5; display:none; flex-direction:column; background:#fff; border-radius:16px; border:1px solid #e8ecf1; overflow:hidden; box-shadow:0 8px 32px rgba(15,23,42,0.06);';
+  // FIX dark: fondo del widget en dark (JS inline gana a cualquier regla tardía)
+  try{ if(loadEpConfig().dark){ w.style.setProperty('background','#141e33','important'); w.style.setProperty('border-color','#1e2e4a','important'); } }catch{}
   w.innerHTML = `
     <div class="ep-config-header">
       <h4 class="ep-config-title">Configuración</h4>
-      <button class="ep-config-btn" id="ep-config-close" title="Cerrar" aria-label="Cerrar"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18"/><path d="M6 6l12 12"/></svg></button>
     </div>
     <div class="ep-config-tabs">
-      <button class="ep-config-tab active" data-cfg-tab="appearance"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 2a10 10 0 0 1 0 20"/></svg> Apariencia</button>
-      <button class="ep-config-tab" data-cfg-tab="layout"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18"/></svg> Posición</button>
+      <button class="ep-config-tab active" data-cfg-tab="appearance"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 2a10 10 0 0 1 0 20"/></svg> Tema</button>
+      <button class="ep-config-tab" data-cfg-tab="layout"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18"/></svg> Diseño</button>
+      <button class="ep-config-tab" data-cfg-tab="notifs"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg> Avisos</button>
       <button class="ep-config-tab" data-cfg-tab="notes"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg> Notas</button>
       <button class="ep-config-tab" data-cfg-tab="feedback"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg> Buzón</button>
     </div>
     <div class="ep-config-body" style="flex:1; overflow-y:auto;">
       <div class="ep-config-section active" data-cfg-section="appearance"></div>
       <div class="ep-config-section" data-cfg-section="layout"></div>
+      <div class="ep-config-section" data-cfg-section="notifs"></div>
       <div class="ep-config-section" data-cfg-section="notes"></div>
       <div class="ep-config-section" data-cfg-section="feedback"></div>
     </div>
@@ -10501,7 +11998,11 @@ function getOrCreateConfigWidget(){
   stack.style.position='relative';
   stack.appendChild(w);
   w.addEventListener('dblclick', (e)=>{ if(e.target.closest('.ep-config-tabs')) return; e.preventDefault(); });
-  w.querySelector('#ep-config-close')?.addEventListener('click', (e)=>{ e.stopPropagation(); hideConfigWidget(); });
+  // FIX doble-bind: mismo guard dataset.epBound2 que el path de re-montaje (el delegado global es red de seguridad)
+  if(!w.querySelector('#ep-config-close')?.dataset.epBound2){
+    const c=w.querySelector('#ep-config-close');
+    if(c){ c.dataset.epBound2='1'; c.addEventListener('click', (e)=>{ e.stopPropagation(); hideConfigWidget(); }); }
+  }
   // tabs
   w.querySelectorAll('.ep-config-tab').forEach(btn=>{
     btn.addEventListener('click', (e)=>{
@@ -10520,6 +12021,9 @@ function getOrCreateConfigWidget(){
   return w;
 }
 function hideConfigWidget(){
+  // FIX hueco: la X es acción real del usuario — limpia locks (config_open_until,
+  // user_action) para que applyExclusiveWidget/hideAllWidgets no se bloqueen.
+  try{ __ep_markUserAction(); }catch{}
   const w=document.querySelector('.ep-config-widget');
   if(w){ w.style.display='none'; w.classList.add('ep-hidden'); }
   // FIX reglas: cerrar config como los demas widgets - restaura el widget que estaba abierto
@@ -10540,6 +12044,25 @@ function hideConfigWidget(){
       if (!anyVisible) unmountListSidePanel();
     }
   } catch {}
+  // FIX hueco residual: la restauración del widget previo es async (animaciones ~400ms) y
+  // la verificación de arriba corre sincrónica en medio — si el widget previo no llegó a
+  // mostrarse (o una rama bloqueada dejó el shell expandido), queda el hueco del widget.
+  // Verificación diferida: si NADA quedó visible, colapsa de verdad (estado oculto +
+  // wrapper colapsado + unmount en list). Barato y cubre todas las ramas de fuga.
+  try{
+    setTimeout(()=>{
+      try{
+        const vis = document.querySelector('.ep-wrapper .dues-container:not(.ep-hidden), .ep-wrapper .ep-schedule-widget:not(.ep-hidden), .ep-wrapper .ep-mail-widget:not(.ep-hidden), .ep-wrapper .ep-miuv-widget:not(.ep-hidden), .ep-wrapper .ep-config-widget:not(.ep-hidden)');
+        if(vis) return; // algo se restauró bien: nada que arreglar
+        const stack=document.querySelector('.ep-right-stack');
+        if(stack){ stack.classList.remove('ep-state-tasks','ep-state-schedule','ep-state-mail','ep-state-miuv','ep-state-config'); stack.classList.add('ep-state-hidden'); }
+        const wrapper=document.querySelector('.ep-wrapper');
+        if(wrapper) wrapper.classList.add('ep-collapsed');
+        try{ localStorage.setItem('ep_active_widget','hidden'); }catch{}
+        if (__ep_isList()) unmountListSidePanel();
+      }catch{}
+    }, 600);
+  }catch{}
 }
 // FIX: delegado global para #ep-config-close — asegura cierre aunque el listener directo se pierda por re-render
 if(!window.__epCloseDelegated){
@@ -10566,51 +12089,74 @@ function showConfigWidget(){
   const w=getOrCreateConfigWidget();
   w.style.display='flex';
   w.style.flexDirection='column';
-  w.classList.remove('ep-hidden');
   w.style.position='absolute';
   w.style.inset='0';
   w.style.zIndex='5';
-  w.style.opacity='1';
   w.style.visibility='visible';
   w.style.pointerEvents='auto';
+  // showWidget owns the visibility + the popover enter animation
+  try { showWidget(w, 'config'); } catch { w.classList.remove('ep-hidden'); }
   renderEpConfigSections(w);
+  // FIX scroll config: restaurar posición al reabrir
+  try{ requestAnimationFrame(()=>{ try{ __ep_cfg_restoreScroll(w); }catch{} }); }catch{}
   try{ navigator.vibrate?.(10);}catch{}
   console.log('[EP] showConfigWidget → abierto como widget');
 }
-function toggleConfigWidget(){
+async function toggleConfigWidget(){
+  __ep_prePromoteSheet('config'); // FIX MAIL-PERF GPU: promoción pre-animación
   try{ __ep_markUserAction(); }catch{}
+  try{ __epCleanupWidgetDuplicates(); }catch{}
+  // FIX: el lock solo protege aperturas PROGRAMATICAS (re-open loops); __ep_markUserAction
+  // ya lo limpio -> cualquier click usuario en otro widget nunca se descarta.
   window.__ep_config_open_until = Date.now() + 2500;
   // FIX reglas gear: igual que los demas widgets - si el shell lateral no esta montado (todo cerrado), montarlo
   try{ if (__ep_isList()) mountListSidePanel(); else ensureEpShell(); }catch{}
   const w = getOrCreateConfigWidget();
-  const isOpen = w && !w.classList.contains('ep-hidden') && w.style.display!=='none' && getComputedStyle(w).display!=='none';
-  if(isOpen){
-    // cerrar por toggle = MISMAS reglas que los otros widgets (restaura el anterior o colapsa)
-    hideConfigWidget();
+  // MISMO patron que toggleTasks/toggleMiuv: decidir por el estado real del widget
+  const cur = getActiveWidget();
+  const hidden = document.querySelector('.ep-config-widget.ep-hidden');
+  if (cur === 'config' && !hidden) {
+    // cerrar por toggle = MISMAS reglas que los otros widgets (colapsa todo)
+    await hideAllWidgets();
   } else {
-    try{ const cur = localStorage.getItem('ep_active_widget'); if(cur && cur!=='config') localStorage.setItem('ep_active_widget_before_config', cur); }catch{}
+    try{ if(cur && cur!=='config') localStorage.setItem('ep_active_widget_before_config', cur); }catch{}
+    // applyExclusiveWidget ya hace el display setup de config y lanza showWidget —
+    // NO forzar display/visibility/position inline aqui (corria la animacion de entrada).
     applyExclusiveWidget('config');
-    try{
-      w.classList.remove('ep-hidden');
-      w.style.display='flex';
-      w.style.flexDirection='column';
-      w.style.opacity='1';
-      w.style.visibility='visible';
-      w.style.position='absolute';
-      w.style.inset='0';
-      w.style.zIndex='5';
-      w.style.pointerEvents='auto';
-      const stack=document.querySelector('.ep-right-stack');
-      if(stack) stack.style.position='relative';
-    }catch{}
     renderEpConfigSections(w);
+    // FIX scroll config: reabrir tras display:none puede perder el scrollTop — restaurarlo
+    try{ requestAnimationFrame(()=>{ try{ __ep_cfg_restoreScroll(w); }catch{} }); }catch{}
   }
   try{ navigator.vibrate?.(10);}catch{}
-  console.log('[EP] toggleConfigWidget →', isOpen?'cierra':'abre', 'lock hasta', window.__ep_config_open_until);
+  console.log('[EP] toggleConfigWidget →', (cur==='config' && !hidden)?'cierra':'abre');
+}
+// FIX scroll config: recuerda la posición de scroll del cuerpo de configuración.
+// Los re-renders (migraciones, re-sync) y los ciclos display:none↔flex pierden el
+// scrollTop (el contenido colapsa, el navegador lo clampea a 0) y el widget
+// "regresa al inicio" mientras el usuario baja.
+function __ep_cfg_trackScroll(w){
+  try{
+    if(!w || w.dataset.epScrollKeep==='1') return;
+    const body = w.querySelector('.ep-config-body');
+    if(!body) return;
+    w.dataset.epScrollKeep='1';
+    body.addEventListener('scroll', ()=>{ try{ w.dataset.epScrollTop = String(body.scrollTop); }catch{} }, { passive:true });
+  }catch{}
+}
+function __ep_cfg_restoreScroll(w){
+  try{
+    const body = w && w.querySelector('.ep-config-body');
+    const v = parseInt((w && w.dataset.epScrollTop) || '0', 10) || 0;
+    if(body && v > 0) body.scrollTop = v;
+  }catch{}
 }
 function renderEpConfigSections(w){
   if(!w) w=document.querySelector('.ep-config-widget');
   if(!w) return;
+  // FIX scroll config: guarda la posición antes de tocar el DOM y restaurala al final
+  try{ __ep_cfg_trackScroll(w); }catch{}
+  const _cfgBody = w.querySelector('.ep-config-body');
+  const _cfgScroll = _cfgBody ? _cfgBody.scrollTop : 0;
   const cfg = loadEpConfig();
   // appearance — migra si falta el toggle nuevo (showFacilitator)
   const appSec = w.querySelector('[data-cfg-section="appearance"]');
@@ -10634,6 +12180,23 @@ function renderEpConfigSections(w){
           </div>
           <button class="ep-toggle ${cfg.dark?'on':''}" data-toggle="dark" aria-label="Modo oscuro"></button>
         </div>
+        <div class="ep-cfg-row" data-bg-row style="flex-direction:column; align-items:stretch; gap:10px;">
+          <div>
+            <div style="font-size:13px; font-weight:600; color:#0f172a;" class="ep-cfg-title-dark">Fondo personalizado</div>
+            <div class="ep-cfg-desc">Importa tu propia imagen (PNG, JPG, WebP o GIF animado) o video (MP4/WebM) desde tu computadora y úsalo como fondo de Eminus. Aparece al instante en cada recarga. También puedes buscar wallpapers 4K en YouTube y descargarlos con tu convertidor preferido.</div>
+          </div>
+          <div class="ep-bg-actions-row">
+            <span id="ep-bg-thumb" title="Fondo actual"></span>
+            <button class="ep-config-btn" id="ep-bg-import" style="width:auto; padding:0 12px; height:30px; font-size:11px;">Importar archivo</button>
+            <button class="ep-config-btn" id="ep-bg-remove" style="width:auto; padding:0 12px; height:30px; font-size:11px;">Quitar</button>
+          </div>
+          <div class="ep-bg-search-row">
+            <input type="text" id="ep-bg-search" class="ep-bg-search-inp" placeholder="p. ej. Minecraft" spellcheck="false" aria-label="Término de búsqueda de wallpapers">
+            <button class="ep-config-btn" id="ep-bg-search-go" title="Buscar en YouTube (solo 4K)" aria-label="Buscar en YouTube" style="width:30px; height:30px; flex-shrink:0;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.35-4.35"/></svg></button>
+            <button class="ep-config-btn" id="ep-bg-dl" title="Abrir convertidor para descargar el video" aria-label="Abrir convertidor" style="width:30px; height:30px; flex-shrink:0;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg></button>
+          </div>
+          <input type="file" id="ep-bg-file" accept="image/png,image/jpeg,image/webp,image/gif,video/mp4,video/webm" style="display:none" aria-label="Importar archivo de fondo (imagen o video)">
+        </div>
         <div class="ep-cfg-row">
           <div>
             <div style="font-size:13px; font-weight:600; color:#0f172a;">Interfaz limpia</div>
@@ -10655,6 +12218,52 @@ function renderEpConfigSections(w){
             </div>
           </div>
           <button class="ep-toggle ${cfg.showFacilitator?'on':''}" data-toggle="showFacilitator" aria-label="Mostrar facilitador"></button>
+        </div>
+        <div class="ep-cfg-row">
+          <div>
+            <div style="font-size:13px; font-weight:600; color:#0f172a;">Ocultar nombre</div>
+            <div class="ep-cfg-desc">Oculta tu nombre en la barra superior. Se aplica desde la carga, sin parpadeo.</div>
+            <div style="display:flex; gap:6px; margin-top:6px; flex-wrap:wrap;">
+              <span style="font-size:10px; padding:3px 7px; border-radius:6px; background:#fff; border:1px solid #e2e8f0; color:#94a3b8; font-family:monospace; text-decoration:line-through;">&lt;span class="h5 …"&gt;</span>
+            </div>
+          </div>
+          <button class="ep-toggle ${cfg.hideStudentName?'on':''}" data-toggle="hideStudentName" aria-label="Ocultar nombre"></button>
+        </div>
+        <div class="ep-cfg-row">
+          <div>
+            <div style="font-size:13px; font-weight:600; color:#0f172a;">Ocultar filtros</div>
+            <div class="ep-cfg-desc">En la lista de cursos oculta "Otros", el contador, el buscador y los filtros. Se aplica desde la carga, sin parpadeo.</div>
+            <div style="display:flex; gap:6px; margin-top:6px; flex-wrap:wrap;">
+              <span style="font-size:10px; padding:3px 7px; border-radius:6px; background:#fff; border:1px solid #e2e8f0; color:#94a3b8; font-family:monospace; text-decoration:line-through;">&lt;form class="FILTER_BOX"&gt;</span>
+              <span style="font-size:10px; padding:3px 7px; border-radius:6px; background:#fff; border:1px solid #e2e8f0; color:#94a3b8; font-family:monospace; text-decoration:line-through;">&lt;div class="SEARCH_BAR_BOX"&gt;</span>
+            </div>
+          </div>
+          <button class="ep-toggle ${cfg.hideFilters?'on':''}" data-toggle="hideFilters" aria-label="Ocultar filtros"></button>
+        </div>
+        <div class="ep-cfg-row">
+          <div>
+            <div style="font-size:13px; font-weight:600; color:#0f172a;">Tarjeta compacta</div>
+            <div class="ep-cfg-desc">Quita portada e icono del curso: insignias a la izquierda y carpeta + favorito a la derecha, en una línea.</div>
+            <div style="display:flex; gap:6px; margin-top:6px; flex-wrap:wrap;">
+              <span style="font-size:10px; padding:3px 7px; border-radius:6px; background:#fff; border:1px solid #e2e8f0; color:#94a3b8; font-family:monospace; text-decoration:line-through;">&lt;div class="CardHeader"&gt;</span>
+              <span style="font-size:10px; padding:3px 7px; border-radius:6px; background:#fff; border:1px solid #e2e8f0; color:#94a3b8; font-family:monospace; text-decoration:line-through;">&lt;div class="CardBodyCircle"&gt;</span>
+            </div>
+          </div>
+          <button class="ep-toggle ${cfg.cardCompact?'on':''}" data-toggle="cardCompact" aria-label="Tarjeta compacta"></button>
+        </div>
+        <div class="ep-cfg-row">
+          <div>
+            <div style="font-size:13px; font-weight:600; color:#0f172a;">Barra difuminada</div>
+            <div class="ep-cfg-desc">Barra superior translúcida con desenfoque de vidrio; variante profunda en modo oscuro.</div>
+          </div>
+          <button class="ep-toggle ${cfg.frostedBar?'on':''}" data-toggle="frostedBar" aria-label="Barra difuminada"></button>
+        </div>
+        <div class="ep-cfg-row">
+          <div>
+            <div style="font-size:13px; font-weight:600; color:#0f172a;">Logo por temporada</div>
+            <div class="ep-cfg-desc">Cambia el logo por el GIF de la festividad activa: Reyes Magos (4-8 ene), Amistad (12-15 feb), Bandera (23-25 feb), Aniversario UV (10-12 sep), Fiestas Patrias (13-17 sep), Muertos (31 oct-2 nov), Revolución (3er lunes de nov, lunes a viernes), Posadas (16-23 dic), Navidad (24-26 dic) y Año Nuevo (30 dic-3 ene).</div>
+          </div>
+          <button class="ep-toggle ${cfg.seasonalLogo!==false?'on':''}" data-toggle="seasonalLogo" aria-label="Logo por temporada"></button>
         </div>
       </div>
       <div class="ep-cfg-group">
@@ -10727,6 +12336,49 @@ function renderEpConfigSections(w){
         btn.classList.toggle('on', !!cur[key]);
         try{ navigator.vibrate?.(10);}catch{}
       });
+    });
+    // Fondo personalizado: importar / previsualizar / quitar
+    const bgFileInp = appSec.querySelector('#ep-bg-file');
+    const bgThumb = appSec.querySelector('#ep-bg-thumb');
+    const paintBgUI = () => { try{ __ep_bgPaintThumb(); }catch{} };
+    paintBgUI();
+    appSec.querySelector('#ep-bg-import')?.addEventListener('click', ()=>{
+      try{ bgFileInp?.click(); }catch{}
+    });
+    appSec.querySelector('#ep-bg-remove')?.addEventListener('click', ()=>{
+      try{
+        __ep_bgSave(null); paintBgUI();
+        try{ navigator.vibrate?.(10);}catch{}
+      }catch{}
+    });
+    bgFileInp?.addEventListener('change', ()=>{
+      try{
+        const f = bgFileInp.files && bgFileInp.files[0];
+        if(!f) return;
+        __ep_bgImport(f);
+        bgFileInp.value = '';
+      }catch{}
+    });
+    // Búsqueda de wallpapers en YouTube (término = "Wallpaper 4K" + lo que escriba el
+    // usuario) y convertidor externo para descargar el video — solo abren pestañas,
+    // sin fetch ni permisos nuevos. El filtro sp va fijo (ya viene doble-encodeado).
+    const bgSearchInp = appSec.querySelector('#ep-bg-search');
+    const bgSearchUrl = () => {
+      let term = '';
+      try{ term = (bgSearchInp.value || '').trim(); }catch{}
+      const q = encodeURIComponent('Wallpaper 4K' + (term ? ' ' + term : ''));
+      return 'https://www.youtube.com/results?search_query=' + q + '&sp=EgIYBA%253D%253D';
+    };
+    appSec.querySelector('#ep-bg-search-go')?.addEventListener('click', ()=>{
+      try{ window.open(bgSearchUrl(), '_blank', 'noopener'); }catch{}
+    });
+    bgSearchInp?.addEventListener('keydown', (e)=>{
+      try{
+        if(e.key === 'Enter'){ e.preventDefault(); window.open(bgSearchUrl(), '_blank', 'noopener'); }
+      }catch{}
+    });
+    appSec.querySelector('#ep-bg-dl')?.addEventListener('click', ()=>{
+      try{ window.open('https://app.ytdown.to/es30/', '_blank', 'noopener'); }catch{}
     });
     // custom
     const colorInp = appSec.querySelector('#ep-accent-color');
@@ -10823,6 +12475,11 @@ function renderEpConfigSections(w){
     const darkBtn = appSec.querySelector('[data-toggle="dark"]'); if(darkBtn) darkBtn.classList.toggle('on', !!cfg.dark);
     const hideUVBtn = appSec.querySelector('[data-toggle="hideUVBranding"]'); if(hideUVBtn) hideUVBtn.classList.toggle('on', !!cfg.hideUVBranding);
     const showFacBtn = appSec.querySelector('[data-toggle="showFacilitator"]'); if(showFacBtn) showFacBtn.classList.toggle('on', !!cfg.showFacilitator);
+    const hideNameBtn = appSec.querySelector('[data-toggle="hideStudentName"]'); if(hideNameBtn) hideNameBtn.classList.toggle('on', !!cfg.hideStudentName);
+    const hideFiltersBtn = appSec.querySelector('[data-toggle="hideFilters"]'); if(hideFiltersBtn) hideFiltersBtn.classList.toggle('on', !!cfg.hideFilters);
+    const cardCompactBtn = appSec.querySelector('[data-toggle="cardCompact"]'); if(cardCompactBtn) cardCompactBtn.classList.toggle('on', !!cfg.cardCompact);
+        const frostedBarBtn = appSec.querySelector('[data-toggle="frostedBar"]'); if(frostedBarBtn) frostedBarBtn.classList.toggle('on', !!cfg.frostedBar);
+        const seasonalBtn = appSec.querySelector('[data-toggle="seasonalLogo"]'); if(seasonalBtn) seasonalBtn.classList.toggle('on', cfg.seasonalLogo !== false);
     const _bHex2=getBrandDefaultHex() || cfg.accent || EP_DEFAULT_CONFIG.accent;
     const _defRow2b=appSec.querySelector('#ep-accent-default-row');
     if(_defRow2b){
@@ -10843,9 +12500,47 @@ function renderEpConfigSections(w){
   }
   // layout
   const laySec = w.querySelector('[data-cfg-section="layout"]');
+  // migra si falta el toggle nuevo (mailWidget)
+  if(laySec && laySec.dataset.rendered && !laySec.querySelector('[data-toggle="mailWidget"]')){
+    laySec.dataset.rendered='';
+    laySec.innerHTML='';
+  }
   if(laySec && !laySec.dataset.rendered){
     laySec.dataset.rendered='1';
     laySec.innerHTML = `
+      <div class="ep-cfg-group">
+        <p class="ep-cfg-label">Modo vista</p>
+        <div class="ep-cfg-desc" style="margin-bottom:8px;">Formato de las tarjetas de tareas, exámenes y foros</div>
+        <div class="ep-side-grid">
+          <button class="ep-side-opt ${(cfg.viewMode||'default')==='default'?'active':''}" data-view-mode="default">
+            <svg width="28" height="20" viewBox="0 0 40 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="6" y="1" width="28" height="22" rx="3"/><line x1="10" y1="7" x2="30" y2="7" stroke-width="2.2"/><line x1="10" y1="13" x2="30" y2="13"/><line x1="10" y1="17" x2="24" y2="17"/></svg>
+            <strong>Predeterminada</strong><span>Aspecto actual de las tarjetas</span>
+          </button>
+          <button class="ep-side-opt ${(cfg.viewMode||'default')==='compact'?'active':''}" data-view-mode="compact">
+            <svg width="28" height="20" viewBox="0 0 40 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="6" y="1" width="28" height="22" rx="3"/><line x1="10" y1="5" x2="30" y2="5" stroke-width="2.2"/><line x1="10" y1="9" x2="26" y2="9"/><line x1="10" y1="13" x2="30" y2="13" stroke-width="2.2"/><line x1="10" y1="17" x2="26" y2="17"/></svg>
+            <strong>Compacta</strong><span>Fila delgada, sin descripción</span>
+          </button>
+          <button class="ep-side-opt ${(cfg.viewMode||'default')==='date'?'active':''}" data-view-mode="date">
+            <svg width="28" height="20" viewBox="0 0 40 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="6" y="1" width="28" height="22" rx="3"/><line x1="10" y1="5" x2="14" y2="5" stroke-width="2.4"/><line x1="10" y1="9" x2="30" y2="9"/><line x1="10" y1="13" x2="14" y2="13" stroke-width="2.4"/><line x1="10" y1="17" x2="30" y2="17"/></svg>
+            <strong>Por fecha</strong><span>Agrupadas por Hoy, Mañana…</span>
+          </button>
+          <button class="ep-side-opt ${((cfg.viewMode||'default')==='compact-date'||(cfg.viewMode||'default')==='simple')?'active':''}" data-view-mode="compact-date">
+            <svg width="28" height="20" viewBox="0 0 40 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="6" y="1" width="28" height="22" rx="3"/><line x1="10" y1="5" x2="30" y2="5" stroke-width="2.2"/><line x1="10" y1="9" x2="26" y2="9"/><line x1="10" y1="12" x2="30" y2="12" opacity="0.55"/><line x1="10" y1="13" x2="30" y2="13" stroke-width="2.2"/><line x1="10" y1="17" x2="26" y2="17"/></svg>
+            <strong>Compacta por fecha</strong><span>Fila delgada agrupada por días</span>
+          </button>
+        </div>
+        <div class="ep-cfg-desc" style="margin-top:8px;">Los modos se aplican al instante a las tarjetas de tareas, exámenes y foros.</div>
+      </div>
+      <div class="ep-cfg-group">
+        <p class="ep-cfg-label">Widget de mensajes</p>
+        <div class="ep-cfg-row">
+          <div>
+            <div style="font-size:13px; font-weight:600; color:#0f172a;" class="ep-cfg-title-dark">Abrir widget de correo</div>
+            <div class="ep-cfg-desc">Activado: el botón del sobre abre el widget con tus mensajes. Desactivado: mismo botón y diseño, pero te lleva directo al Centro de mensajes de Eminus.</div>
+          </div>
+          <button class="ep-toggle ${cfg.mailWidget!==false?'on':''}" data-toggle="mailWidget" aria-label="Abrir widget de correo"></button>
+        </div>
+      </div>
       <div class="ep-cfg-group">
         <p class="ep-cfg-label">Lado de los widgets</p>
         <div class="ep-side-grid">
@@ -10882,11 +12577,192 @@ function renderEpConfigSections(w){
         try{ navigator.vibrate?.(10);}catch{}
       });
     });
+    laySec.querySelectorAll('[data-view-mode]').forEach(btn=>{
+      btn.addEventListener('click', ()=>{
+        const vm=btn.dataset.viewMode;
+        const ncfg={ ...loadEpConfig(), viewMode: vm };
+        saveEpConfig(ncfg); applyEpConfig(ncfg);
+        // Instante: aplica ep-view-* / agrupación al widget abierto SIN re-render
+        try{ if (typeof __ep_applyViewMode==='function') __ep_applyViewMode(); }catch{}
+        laySec.querySelectorAll('[data-view-mode]').forEach(b=> b.classList.toggle('active', b.dataset.viewMode===vm));
+        try{ navigator.vibrate?.(10);}catch{}
+      });
+    });
+    // toggle widget de mensajes
+    const mwBtn = laySec.querySelector('[data-toggle="mailWidget"]');
+    if(mwBtn){
+      mwBtn.addEventListener('click', ()=>{
+        const cur=loadEpConfig();
+        cur.mailWidget=!cur.mailWidget;
+        saveEpConfig(cur); applyEpConfig(cur);
+        mwBtn.classList.toggle('on', !!cur.mailWidget);
+        // si el widget de correo está abierto al desactivar, ciérralo
+        try{ if(!cur.mailWidget && getActiveWidget()==='mail') hideAllWidgets(); }catch{}
+        // sin widget de correo: el contador del icono desaparece al instante
+        try{
+          if(!cur.mailWidget){
+            const bb=document.querySelector('.ep-mail-bar .ep-mail-badge'); if(bb) bb.style.setProperty('display','none','important');
+            const mb=document.querySelector('.ep-mail-bar .ep-mail-btn'); if(mb) mb.classList.remove('has-unread');
+            const bc=document.querySelector('.ep-mail-panel-count'); if(bc) bc.classList.remove('has-unread');
+          }
+        }catch{}
+        try{ navigator.vibrate?.(10);}catch{}
+      });
+    }
   } else if(laySec){
     laySec.querySelectorAll('[data-side]').forEach(b=> b.classList.toggle('active', b.dataset.side===cfg.side));
+    // 'simple' (legacy, plan 678879b6 W2) resalta la opción 'compact-date' sin reescribir lo guardado
+    laySec.querySelectorAll('[data-view-mode]').forEach(b=> { const _cv=cfg.viewMode||'default'; b.classList.toggle('active', b.dataset.viewMode===(_cv==='simple'?'compact-date':_cv)); });
+    const mwBtnRs = laySec.querySelector('[data-toggle="mailWidget"]'); if(mwBtnRs) mwBtnRs.classList.toggle('on', cfg.mailWidget!==false);
     try { const pv = laySec.querySelector('.ep-side-preview'); if (pv) pv.style.flexDirection = cfg.side==='left' ? 'row' : 'row-reverse'; } catch {}
     // si el widget fue reabierto y el lado cambió en otro lado, asegura DOM
     try{ __ep_applySideInstant(cfg.side); }catch{}
+  }
+  // notifs — campana POR TARJETA + tareas nuevas + umbrales editables
+  const ntfSec = w.querySelector('[data-cfg-section="notifs"]');
+  if(ntfSec && !ntfSec.dataset.rendered){
+    ntfSec.dataset.rendered='1';
+    ntfSec.innerHTML = `
+      <div class="ep-cfg-group">
+        <p class="ep-cfg-label">Avisos de vencimiento</p>
+        <div class="ep-cfg-row">
+          <div>
+            <div style="font-size:13px; font-weight:600; color:#0f172a;" class="ep-cfg-title-dark">Campana por tarea</div>
+            <div class="ep-cfg-desc">Activa la campana en cada tarjeta del widget de tareas para avisar solo de esa tarea. Chrome debe estar abierto (aunque sea en segundo plano).</div>
+          </div>
+        </div>
+        <div class="ep-cfg-desc" style="margin:10px 0 6px;">Avisar antes de que venza:</div>
+        <div style="display:flex; gap:6px; flex-wrap:wrap;">
+          <button class="ep-config-btn ep-notif-th" data-th="24" style="width:auto; padding:0 12px; height:30px; font-size:11px;">24 h</button>
+          <button class="ep-config-btn ep-notif-th" data-th="12" style="width:auto; padding:0 12px; height:30px; font-size:11px;">12 h</button>
+          <button class="ep-config-btn ep-notif-th" data-th="6" style="width:auto; padding:0 12px; height:30px; font-size:11px;">6 h</button>
+          <button class="ep-config-btn ep-notif-th" data-th="1" style="width:auto; padding:0 12px; height:30px; font-size:11px;">1 h</button>
+        </div>
+      </div>
+      <div class="ep-cfg-group">
+        <p class="ep-cfg-label">Nuevas tareas</p>
+        <div class="ep-cfg-row">
+          <div>
+            <div style="font-size:13px; font-weight:600; color:#0f172a;" class="ep-cfg-title-dark">Notificar tarea nueva</div>
+            <div class="ep-cfg-desc">Te avisa cuando aparezca una actividad que aún no hayas visto en pantalla. Lo que ya viste en el widget no se repite.</div>
+          </div>
+          <button class="ep-toggle ${cfg.notifNew?'on':''}" data-ntf-toggle="notifNew" aria-label="Notificar nuevas tareas"></button>
+        </div>
+      </div>
+      <div class="ep-cfg-group">
+        <p class="ep-cfg-label">Estado</p>
+        <div class="ep-cfg-row" style="align-items:flex-start;">
+          <div>
+            <div id="ep-notif-status" style="font-size:12px; font-weight:600; color:#0f172a;"></div>
+            <div class="ep-cfg-desc" id="ep-notif-hint"></div>
+          </div>
+        </div>
+        <div style="margin-top:10px;">
+          <button class="ep-config-btn" id="ep-notif-test" style="width:auto; padding:0 12px; height:30px; font-size:11px;">Enviar notificación de prueba</button>
+        </div>
+      </div>
+    `;
+    const __epnPaint = () => {
+      const c2 = loadEpConfig();
+      const ths = (Array.isArray(c2.notifThresholds) && c2.notifThresholds.length) ? [...new Set(c2.notifThresholds.map(Number))].sort((a,b)=>b-a) : [24,6,1];
+      const __epnDark = !!c2.dark;
+      ntfSec.querySelectorAll('.ep-notif-th').forEach(b => {
+        const on = ths.includes(Number(b.dataset.th));
+        // FIX dark: chips de horas dark-aware (el inline gana a las reglas dark de hoja)
+        b.style.background = on ? 'var(--ep-accent)' : (__epnDark ? '#1e2e4a' : '#f8fafc');
+        b.style.borderColor = on ? 'var(--ep-accent)' : (__epnDark ? '#2a3f62' : '#e2e8f0');
+        b.style.color = on ? '#fff' : (__epnDark ? '#cbd5e1' : '#475569');
+        b.setAttribute('aria-pressed', on ? 'true' : 'false');
+      });
+      ntfSec.querySelectorAll('[data-ntf-toggle]').forEach(b => b.classList.toggle('on', !!c2[b.dataset.ntfToggle]));
+      const st = ntfSec.querySelector('#ep-notif-status');
+      const hint = ntfSec.querySelector('#ep-notif-hint');
+      if (st && hint) {
+        if (c2.notifNew || Object.keys(__ep_notifTasksRead()).length) {
+          st.textContent = 'Notificaciones activas';
+          st.style.color = 'var(--ep-accent)';
+          hint.textContent = 'Chrome revisa cada 15 min y al abrir el navegador. Toca el estado de arriba para forzar una revisión ahora. Si cierras Chrome por completo no hay avisos: mantén "Continuar ejecutando aplicaciones en segundo plano" activado en chrome://settings/system.';
+        } else {
+          st.textContent = 'Notificaciones desactivadas';
+          st.style.color = '#94a3b8';
+          hint.textContent = 'Activa la campana en una tarjeta o los avisos de arriba para empezar.';
+        }
+      }
+    };
+    ntfSec.querySelectorAll('[data-ntf-toggle]').forEach(btn=>{
+      btn.addEventListener('click', ()=>{
+        const key = btn.dataset.ntfToggle;
+        const cur = loadEpConfig();
+        cur[key] = !cur[key];
+        saveEpConfig(cur);
+        // FIX determinismo: al ENCENDER 'Notificar tarea nueva', reinicia el baseline de
+        // vistas (la próxima corrida marca las actuales como conocidas y avisará solo lo
+        // creado después) y limpia el cooldown del SW para que el primer recargo dispare ya.
+        if (key === 'notifNew' && cur[key]) {
+          try { chrome.storage.local.remove(['ep_seen_tasks_v1', 'ep_notif_last_fresh_v1']); } catch {}
+        }
+        btn.classList.toggle('on', !!cur[key]);
+        try{ navigator.vibrate?.(10); }catch{}
+        __epnPaint();
+      });
+    });
+    ntfSec.querySelectorAll('.ep-notif-th').forEach(btn=>{
+      btn.addEventListener('click', ()=>{
+        const h = Number(btn.dataset.th);
+        const cur = loadEpConfig();
+        let ths = (Array.isArray(cur.notifThresholds) && cur.notifThresholds.length) ? cur.notifThresholds.map(Number) : [24,6,1];
+        if (ths.includes(h)) {
+          if (ths.length <= 1) { try{ navigator.vibrate?.(6); }catch{} return; }
+          ths = ths.filter(x => x !== h);
+        } else ths.push(h);
+        const ncfg = { ...cur, notifThresholds: [...new Set(ths)].sort((a,b)=>b-a) };
+        saveEpConfig(ncfg);
+        try{ navigator.vibrate?.(10); }catch{}
+        __epnPaint();
+      });
+    });
+    ntfSec.querySelector('#ep-notif-test')?.addEventListener('click', ()=>{
+      try { chrome.runtime.sendMessage({ action:'epNotifTest' }, () => { void chrome.runtime.lastError; }); } catch {}
+      try{ navigator.vibrate?.(10); }catch{}
+    });
+    // Revisión manual COMPLETA: tocar el estado "Notificaciones activas" fuerza un
+    // check del SW (misma lógica que alarm/startup — sin depender de la consola del SW)
+    const _stChk = ntfSec.querySelector('#ep-notif-status');
+    if (_stChk && !_stChk.dataset.epCheckBound) {
+      _stChk.dataset.epCheckBound = '1';
+      _stChk.style.cursor = 'pointer';
+      _stChk.title = 'Click: revisar tareas nuevas ahora';
+      _stChk.addEventListener('click', () => {
+        try { chrome.runtime.sendMessage({ action: 'epNotifCheck' }, () => { void chrome.runtime.lastError; }); } catch {}
+        try{ navigator.vibrate?.(10); }catch{}
+      });
+    }
+    __epnPaint();
+  } else if(ntfSec){
+    ntfSec.querySelectorAll('[data-ntf-toggle]').forEach(b => b.classList.toggle('on', !!cfg[b.dataset.ntfToggle]));
+    const ths = (Array.isArray(cfg.notifThresholds) && cfg.notifThresholds.length) ? [...new Set(cfg.notifThresholds.map(Number))].sort((a,b)=>b-a) : [24,6,1];
+    const __epnDark2 = !!cfg.dark;
+    ntfSec.querySelectorAll('.ep-notif-th').forEach(b => {
+      const on = ths.includes(Number(b.dataset.th));
+      // FIX dark: chips de horas dark-aware (caché del render)
+      b.style.background = on ? 'var(--ep-accent)' : (__epnDark2 ? '#1e2e4a' : '#f8fafc');
+      b.style.borderColor = on ? 'var(--ep-accent)' : (__epnDark2 ? '#2a3f62' : '#e2e8f0');
+      b.style.color = on ? '#fff' : (__epnDark2 ? '#cbd5e1' : '#475569');
+      b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+    const st = ntfSec.querySelector('#ep-notif-status');
+    const hint = ntfSec.querySelector('#ep-notif-hint');
+    if (st && hint) {
+      if (cfg.notifNew || Object.keys(__ep_notifTasksRead()).length) {
+        st.textContent = 'Notificaciones activas';
+        st.style.color = 'var(--ep-accent)';
+        hint.textContent = 'Chrome revisa cada 15 min y al abrir el navegador. Toca el estado de arriba para forzar una revisión ahora. Si cierras Chrome por completo no hay avisos: mantén "Continuar ejecutando aplicaciones en segundo plano" activado en chrome://settings/system.';
+      } else {
+        st.textContent = 'Notificaciones desactivadas';
+        st.style.color = '#94a3b8';
+        hint.textContent = 'Activa la campana en una tarjeta o los avisos de arriba para empezar.';
+      }
+    }
   }
   // notes
   const notesSec = w.querySelector('[data-cfg-section="notes"]');
@@ -11099,6 +12975,9 @@ function renderEpConfigSections(w){
       }
     });
   }
+  // FIX scroll config: devuelve el scroll a donde estaba el usuario (un re-render
+  // colapsa el contenido un instante y el navegador clampea scrollTop a 0)
+  try{ if(_cfgBody && document.contains(_cfgBody)) _cfgBody.scrollTop = _cfgScroll; }catch{}
 }
 // FIX SISTÉMICO: Parsers MiUV — tolerantes a HTML ASP.NET con tiles/tablas
 function parseMiuvGrades(html) {
@@ -11959,7 +13838,575 @@ function __ep_btnIndicatorSync(active) {
     pill.style.transform = 'translate(' + x + 'px,' + y + 'px) translateZ(0)';
   } catch {}
 }
-function applyExclusiveWidget(active) {
+// ===== FLUID ANIMATION HELPERS =====
+
+function __ep_prefersReducedMotion() {
+  try { return window.matchMedia('(prefers-reduced-motion: reduce)').matches;} catch { return false; }
+}
+
+
+function __ep_getWidgetAnimationType(widgetEl) {
+  if (widgetEl.classList.contains('dues-container')) { return 'sheet'; }
+  if (widgetEl.classList.contains('ep-config-widget')) { return 'popover'; }
+  return 'sheet';
+}
+
+function __ep_getWidgetContentList(widgetEl) { 
+  if (widgetEl.classList.contains('dues-container')) { return widgetEl.querySelecto('.acts-list'); }
+  if (widgetEl.classList.contains('ep-schedule-widget')) { return widgetEl.querySelecto('.ep-schedule-widget-body'); }
+  if (widgetEl.classList.contains('ep-mail-widget')) { return widgetEl.querySelector('.ep-mail-widget-body'); }
+  if (widgetEl.classList.contains('ep-miuv-widget')) { return widgetEl.querySelector('.ep-miuv-widget-body'); }
+  if (widgetEl.classList.contains('ep-config-widget')) { return widgetEl.querySelector('.ep-config-body'); }
+  return null;
+}
+
+
+function __ep_getContentItemq(contentList) { 
+  if (!contentList) { return []; }
+  if (contentList.classList.contains('acts-list')) { return Array.from(contentList.querySelectorAll('.act-item')); }
+  if (contentList.classList.contains('ep-schedule-widget-body')) { return Array.from(contentList.querySelectorAll('.ep-schedule-card')); }
+  if (contentList.classList.contains('ep-mail-widget-body')) { return Array.from(contentList.querySelectorAll('.ep-mail-item')); }
+  if (contentList.classList.contains('ep-miuv-widget-body')) { return Array.from(contentList.querySelectorAll('.ep-miuv-grade-card, .ep-miuv-exam-card, .ep-miuv-area-card')); }
+  if (contentList.classList.contains('ep-config-body')) { return Array.from(contentList.querySelectorAll('.ep-config-section')); }
+  return Array.from(contentList.children);
+}
+
+function __ep_clearUpStaggerClasses(contentList, items) {
+  if (!contentList) { return; }
+  contentList.classList.remove('stagger-children', 'animate-in');
+  if (items) {
+    items.forEach(item => {
+      item.classList.remove('stagger-1','stagger-2','stagger-3','stagger-4','stagger-5','stagger-6','stagger-7','stagger-8');
+      item.style.opacity = '';
+      item.style.transform = '';
+      item.style.transitionDelay = '';
+      // Pin the final state: without this the content script's own
+      // `epCardIn` animation would restart the moment the stagger rules are
+      // gone and the cards would blink once more.
+      item.style.animation = 'none';
+    });
+  }
+}
+
+/**
+ * Widget animation configuration mapping widget types to their animation properties.
+ */
+const __EP_WIDGET_ANIMATION_CONFIG = {
+  tasks: {
+    containerSel: '.dues-container',
+    enterClass: 'animate-fluid-enter',
+    exitClass: 'animate-fluid-exit',
+    contentSel: '.acts-list',
+    itemSel: '.act-item',
+  },
+  schedule: {
+    containerSel: '.ep-schedule-widget',
+    enterClass: 'animate-fluid-enter',
+    exitClass: 'animate-fluid-exit',
+    contentSel: '.ep-schedule-widget-body',
+    itemSel: '.ep-schedule-card',
+  },
+  mail: {
+    containerSel: '.ep-mail-widget',
+    enterClass: 'animate-fluid-enter',
+    exitClass: 'animate-fluid-exit',
+    contentSel: '.ep-mail-widget-body',
+    itemSel: '.ep-mail-item',
+  },
+  miuv: {
+    containerSel: '.ep-miuv-widget',
+    enterClass: 'animate-fluid-enter',
+    exitClass: 'animate-fluid-exit',
+    contentSel: '.ep-miuv-widget-body',
+    itemSel: '.ep-miuv-grade-card, .ep-miuv-exam-card, .ep-miuv-area-card',
+  },
+  config: {
+    containerSel: '.ep-config-widget',
+    enterClass: 'animate-fluid-enter',
+    exitClass: 'animate-fluid-exit',
+    contentSel: '.ep-config-body',
+    itemSel: '.ep-config-section',
+  }
+};
+
+/**
+ * Checks if user prefers reduced motion.
+ * @returns {boolean}
+ */
+function __ep_prefersReducedMotion() {
+  try {
+    return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Applies stagger animation to content items within a widget.
+ * @param {Element} widgetEl - The widget container element
+ * @param {string} widgetType - The widget type key from __EP_WIDGET_ANIMATION_CONFIG
+ */
+function __ep_applyStagger(widgetEl, widgetType) {
+  const config = __EP_WIDGET_ANIMATION_CONFIG[widgetType];
+  if (!config || !widgetEl) return;
+
+  const contentList = widgetEl.querySelector(config.contentSel);
+  if (!contentList) return;
+
+  const items = contentList.querySelectorAll(config.itemSel);
+  if (!items.length) return;
+
+  // Reduce motion: instant reveal, no stagger
+  if (__ep_prefersReducedMotion()) {
+    items.forEach(item => {
+      item.style.opacity = '';
+      item.style.transform = '';
+      item.style.transitionDelay = '';
+      item.style.animation = '';
+    });
+    return;
+  }
+
+  // Setup stagger. The 60% start delay lives in CSS (`--ep-stagger-base`), so
+  // `.animate-in` can be applied right away: the items still wait for the
+  // container to be halfway through its own animation.
+  contentList.classList.add('stagger-children');
+  items.forEach((item, index) => {
+    const staggerClass = `stagger-${Math.min(index + 1, 8)}`;
+    item.classList.add(staggerClass);
+    // The cleanup pins `animation: none` so the content script's own
+    // `epCardIn` cannot take over and replay the card entrance when the
+    // stagger classes are removed. Clearing it here re-arms the stagger.
+    item.style.animation = '';
+  });
+
+  if (contentList.isConnected) {
+    contentList.classList.add('animate-in');
+  }
+}
+
+/**
+ * Cleans up stagger classes after animation completes.
+ * @param {Element} widgetEl - The widget container element
+ * @param {string} widgetType - The widget type key from __EP_WIDGET_ANIMATION_CONFIG
+ */
+function __ep_cleanupStagger(widgetEl, widgetType) {
+  const config = __EP_WIDGET_ANIMATION_CONFIG[widgetType];
+  if (!config || !widgetEl) return;
+
+  const contentList = widgetEl.querySelector(config.contentSel);
+  const items = contentList ? contentList.querySelectorAll(config.itemSel) : null;
+  __ep_clearUpStaggerClasses(contentList, items);
+}
+
+/**
+ * Clears any in-flight fluid animation state from a widget.
+ * @param {Element} widgetEl - The widget container element
+ */
+function __ep_resetFluidState(widgetEl) {
+  if (!widgetEl) return;
+  try {
+    if (widgetEl.__ep_dismissAnimation) {
+      widgetEl.__ep_dismissAnimation.cancel();
+      widgetEl.__ep_dismissAnimation = null;
+    }
+  } catch {}
+  widgetEl.classList.remove(
+    'ep-anim',
+    'animate-fluid-enter',
+    'animate-fluid-exit',
+    'animate-fluid-momentum-exit',
+    'animate-fluid-rubber-snap'
+  );
+  ['--ep-fo', '--ep-fy', '--ep-fs', '--ep-fmat', '--ep-drag-y'].forEach((prop) => {
+    widgetEl.style.removeProperty(prop);
+  });
+}
+
+/**
+ * Shows a widget with fluid enter animation and staggered content entrance.
+ *
+ * The animation drives the fluid channel (`--ep-fo`, `--ep-fy`, `--ep-fs`,
+ * `--ep-fmat`); the `.ep-anim` bridge rule is what hands `opacity` and
+ * `transform` over to that channel while the animation runs.
+ * @param {Element} widgetEl - The widget container element
+ * @param {string} widgetType - The widget type: 'tasks', 'schedule', 'mail', 'miuv', 'config'
+ * @returns {Promise<void>} Resolves when the enter animation starts (fire-and-forget for show)
+ */
+// FIX MAIL-PERF GPU (plan 678879b6): pre-promoción de la capa de la hoja del
+// widget en pointerdown del botón (uniforme en los 5). `will-change: transform,
+// opacity` en la raíz ANTES de que arranque la animación deja que el compositor
+// rasterice la hoja en el tiempo ocioso de la pulsación; durante la animación
+// `.ep-anim` es quien posee la propiedad (mismo valor, sin conflicto) y
+// showWidget/hideWidget ya limpian style.willChange al asentarse. El guard
+// timer garantiza la retirada SIEMPRE (press-sin-abrir, rutas instantáneas) —
+// ninguna capa queda retenida en reposo (la clase de bug anterior).
+function __ep_prePromoteSheet(key) {
+  try {
+    const sel = key === 'tasks' ? '.dues-container'
+      : key === 'schedule' ? '.ep-schedule-widget'
+      : key === 'mail' ? '.ep-mail-widget'
+      : key === 'miuv' ? '.ep-miuv-widget'
+      : key === 'config' ? '.ep-config-widget' : null;
+    if (!sel) return;
+    const el = document.querySelector(sel);
+    if (!el) return;
+    el.style.willChange = 'transform, opacity';
+    try { clearTimeout(el.__ep_wcGuard); } catch {}
+    // Guard: retira la promoción aunque animationend nunca llegue o la
+    // apertura no ocurra. 1200ms > beat de entrada (375ms) + margen.
+    el.__ep_wcGuard = setTimeout(() => { try { el.style.willChange = ''; } catch {} }, 1200);
+  } catch {}
+}
+// FIX COLD-PROMOTE (plan 678879b6): la PRIMERA promoción de un widget grande
+// crea su capa compositada y rastrea todo su contenido (~100-150ms con render
+// por software). Si eso cae dentro del primer beat animado, el animationend
+// aterriza tarde (salida 455-480ms en vez de ~340ms). Pago único fuera de los
+// beats: promoción por will-change INLINE (sin .ep-anim, el bridge no cambia el
+// backdrop visible), un commit+raster, y demota al estado de reposo exacto
+// (inline will-change '', A2.1 intacto). Sin rAF/interval permanente: el rAF y
+// el timeout de 50ms se autoeliminan; el flag por elemento impide repetirlo,
+// y si ningún frame llegó a renderizar (pico de carga) se reintentará en la
+// próxima apertura instantánea.
+function __ep_warmAnimatedLayer(widgetEl) {
+  try {
+    if (!widgetEl || !widgetEl.isConnected) return;
+    if (widgetEl.__ep_layerWarmed) return;
+    widgetEl.__ep_layerWarmed = true;
+    widgetEl.__ep_layerWarmedFrames = false;
+    widgetEl.style.willChange = 'transform, opacity';
+    let done = false;
+    const demote = function () {
+      if (done) return;
+      done = true;
+      try { clearTimeout(widgetEl.__ep_warmGuard); } catch {}
+      try { widgetEl.style.willChange = ''; } catch {}
+      if (!widgetEl.__ep_layerWarmedFrames) widgetEl.__ep_layerWarmed = false;
+    };
+    widgetEl.__ep_warmGuard = setTimeout(demote, 50);
+    requestAnimationFrame(function () {
+      try { widgetEl.__ep_layerWarmedFrames = true; } catch {}
+      requestAnimationFrame(demote);
+    });
+  } catch {}
+}
+// FIX PERF-LOG (plan 678879b6): longtasks agregados por ventana de transición.
+// Un PerformanceObserver('longtask') vive SOLO durante la animación (sin trabajo
+// por frame) y al terminar registra UNA línea: '[EP] anim <widget> <enter|exit>:
+// <n> longtasks, <total>ms' — así el usuario puede reportar números de hardware
+// real desde la consola de DevTools si algo sigue tirando.
+function __ep_animPerfStart(widgetEl, widgetType, phase, durMs) {
+  try {
+    if (!widgetEl || typeof PerformanceObserver === 'undefined' || typeof PerformanceObserver !== 'function') return;
+    try { if (widgetEl.__ep_animPerfObs) { widgetEl.__ep_animPerfObs.disconnect(); } } catch {}
+    widgetEl.__ep_animPerfObs = null;
+    let n = 0, total = 0;
+    const obs = new PerformanceObserver((list) => {
+      try { for (const e of list.getEntries()) { n++; total += e.duration; } } catch {}
+    });
+    obs.observe({ type: 'longtask' });
+    widgetEl.__ep_animPerfObs = obs;
+    setTimeout(() => {
+      try { obs.disconnect(); } catch {}
+      if (widgetEl.__ep_animPerfObs === obs) widgetEl.__ep_animPerfObs = null;
+      try { console.log('[EP] anim ' + widgetType + ' ' + phase + ': ' + n + ' longtasks, ' + Math.round(total) + 'ms'); } catch {}
+    }, (durMs || 375) + 250);
+  } catch {}
+}
+async function showWidget(widgetEl, widgetType, opts) {
+  if (!widgetEl) return;
+
+  const config = __EP_WIDGET_ANIMATION_CONFIG[widgetType];
+  if (!config) {
+    // Fallback: just remove hidden class
+    widgetEl.classList.remove('ep-hidden');
+    return;
+  }
+
+  // FIX CAUSE A: restore/init/corrección NO deben reproducir la animación de
+  // entrada (era el "open animation replay" en cada carga/navegación). Modo
+  // instantáneo: nunca añade .ep-anim ni la clase de enter (cero keyframe/WAAPI);
+  // deja el estado FINAL: display correcto, sin .ep-hidden, sin clases de
+  // animación huérfanas — ep-state-* muestra el widget ya asentado.
+  // Los clicks de usuario siguen llamando sin opts y conservan la animación.
+  if (opts && opts.instant) {
+    try {
+      if (widgetType === 'schedule' || widgetType === 'mail' || widgetType === 'miuv' || widgetType === 'config') widgetEl.style.display = 'flex';
+      else widgetEl.style.display = '';
+    } catch {}
+    // Token nuevo: anula rAF/timers de una entrada/salida animada en vuelo
+    widgetEl.__ep_fluidToken = (widgetEl.__ep_fluidToken || 0) + 1;
+    __ep_resetFluidState(widgetEl);
+    widgetEl.classList.remove('ep-hidden');
+    widgetEl.style.willChange = '';
+    widgetEl.style.removeProperty('--ep-fmat');
+    try { __ep_cleanupStagger(widgetEl, widgetType); } catch {}
+    // FIX COLD-PROMOTE: paga el coste de la primera promoción aquí, fuera de
+    // los beats animados medidos (ver __ep_warmAnimatedLayer arriba).
+    try { __ep_warmAnimatedLayer(widgetEl); } catch {}
+    return;
+  }
+
+  const prefersReduced = __ep_prefersReducedMotion();
+
+  // FIX CAUSE 2/slot: hideWidget dejó display:none inline al terminar la salida.
+  // Restaura el display de flujo ANTES de quitar .ep-hidden / añadir .ep-anim para
+  // que el widget vuelva a ocupar su hueco y la animación de entrada sea visible.
+  // dues usa su display natural (block en flujo); schedule/mail/miuv/config son flex.
+  try {
+    if (widgetType === 'schedule' || widgetType === 'mail' || widgetType === 'miuv' || widgetType === 'config') widgetEl.style.display = 'flex';
+    else widgetEl.style.display = '';
+  } catch {}
+
+  // Cancel whatever was running before (previous animation, drag, momentum)
+  __ep_resetFluidState(widgetEl);
+
+  // Remove hidden class first so the widget is in the layout before animating
+  widgetEl.classList.remove('ep-hidden');
+
+  // Modo vista (plan 678879b6): re-aplica ep-view-* al mostrar el widget de tareas
+  if (widgetType === 'tasks') { try{ __ep_applyViewMode(); }catch{} }
+
+  // Token guards against a stale animationend removing a newer animation
+  const token = (widgetEl.__ep_fluidToken = (widgetEl.__ep_fluidToken || 0) + 1);
+
+  // The bridge rule only applies while `.ep-anim` is present
+  widgetEl.classList.add('ep-anim');
+
+  if (prefersReduced) {
+    // Reduced motion: cross-fade via opacity transition, no transform
+    widgetEl.style.setProperty('--ep-fo', '0');
+    widgetEl.style.setProperty('--ep-fo', '1');
+    // Material: instant in reduced motion
+    widgetEl.style.setProperty('--ep-fmat', '1');
+    setTimeout(() => {
+      if (widgetEl.__ep_fluidToken !== token) return;
+      widgetEl.classList.remove('ep-anim');
+      widgetEl.style.removeProperty('--ep-fo');
+      widgetEl.style.removeProperty('--ep-fmat');
+      // FIX MAIL-PERF GPU: retira también la will-change inline de la pre-promoción
+      widgetEl.style.willChange = '';
+    }, 200);
+    return;
+  }
+
+  // Normal motion: fluid enter animation
+  // Material: the enter class runs fluid-material-enter as a SECOND keyframe on
+  // the sheet beat (375ms), so the material starts in the SAME frame as the
+  // sheet — no rAF before it can paint (faster perceived start; the bridge's
+  // --ep-fmat transition remains as a no-op fallback).
+
+    widgetEl.classList.add(config.enterClass);
+
+    // FIX PERF-LOG: longtasks agregados de esta ventana de entrada
+    __ep_animPerfStart(widgetEl, widgetType, 'enter', widgetType === 'config' ? 200 : 375);
+
+    // Apply stagger to content items
+    __ep_applyStagger(widgetEl, widgetType);
+
+  const enterDuration = widgetType === 'config' ? 200 : 375;
+
+  const onAnimationEnd = (e) => {
+    if (e.target !== widgetEl) return;
+    if (widgetEl.__ep_fluidToken !== token) return;
+    widgetEl.removeEventListener('animationend', onAnimationEnd);
+    widgetEl.classList.remove(config.enterClass);
+    widgetEl.classList.remove('ep-anim');
+    widgetEl.style.willChange = '';
+    widgetEl.style.removeProperty('--ep-fmat');
+    try { __ep_cleanupStagger(widgetEl, widgetType); } catch {}
+  };
+  widgetEl.addEventListener('animationend', onAnimationEnd);
+
+  // Fallback timeout in case animationend never fires
+  setTimeout(() => {
+    widgetEl.removeEventListener('animationend', onAnimationEnd);
+    if (widgetEl.__ep_fluidToken !== token) return;
+    widgetEl.classList.remove(config.enterClass);
+    widgetEl.classList.remove('ep-anim');
+    widgetEl.style.willChange = '';
+    widgetEl.style.removeProperty('--ep-fmat');
+    try { __ep_cleanupStagger(widgetEl, widgetType); } catch {}
+  }, enterDuration + 150);
+}
+
+/**
+ * Hides a widget with fluid exit animation, then adds .ep-hidden.
+ * @param {Element} widgetEl - The widget container element
+ * @param {string} widgetType - The widget type: 'tasks', 'schedule', 'mail', 'miuv', 'config'
+ * @returns {Promise<void>} Resolves when the exit animation completes and .ep-hidden is added
+ */
+function hideWidget(widgetEl, widgetType, opts) {
+  return new Promise((resolve) => {
+    if (!widgetEl) {
+      resolve();
+      return;
+    }
+
+    const config = __EP_WIDGET_ANIMATION_CONFIG[widgetType];
+    if (!config) {
+      // Fallback: just add hidden class
+      widgetEl.classList.add('ep-hidden');
+      resolve();
+      return;
+    }
+
+    // FIX CAUSE A: restore/init/corrección no deben reproducir el keyframe de
+    // salida — estado final inmediato (mismo resultado que terminar la salida
+    // animada): .ep-hidden + display:none, sin animación que se re-playee.
+    if (opts && opts.instant) {
+      widgetEl.__ep_fluidToken = (widgetEl.__ep_fluidToken || 0) + 1;
+      __ep_resetFluidState(widgetEl);
+      widgetEl.classList.add('ep-hidden');
+      widgetEl.style.display = 'none'; // FIX slot: fuera del flujo al instante
+      try { __ep_cleanupStagger(widgetEl, widgetType); } catch {}
+      resolve();
+      return;
+    }
+
+    const token = (widgetEl.__ep_fluidToken = (widgetEl.__ep_fluidToken || 0) + 1);
+    const prefersReduced = __ep_prefersReducedMotion();
+
+    // Hand opacity/transform to the channel for the duration of the exit
+    widgetEl.classList.add('ep-anim');
+
+    if (prefersReduced) {
+      // Reduced motion: cross-fade via opacity transition
+      widgetEl.style.setProperty('--ep-fo', '0');
+      // Material: instant out in reduced motion
+      widgetEl.style.setProperty('--ep-fmat', '0');
+      setTimeout(() => {
+        if (widgetEl.__ep_fluidToken !== token) {
+          resolve();
+          return;
+        }
+      widgetEl.classList.add('ep-hidden');
+      widgetEl.style.display = 'none'; // FIX slot: fuera del flujo (reduced-motion, sin animación que esperar)
+      widgetEl.classList.remove('ep-anim');
+        widgetEl.style.removeProperty('--ep-fo');
+        widgetEl.style.removeProperty('--ep-fmat');
+        // FIX MAIL-PERF GPU: retira también la will-change inline de la pre-promoción
+        widgetEl.style.willChange = '';
+        resolve();
+      }, 200); // 150ms cross-fade + buffer
+      return;
+    }
+
+    // Normal motion: fluid exit animation
+    // Material: the exit class runs fluid-material-exit as a SECOND keyframe on
+    // the sheet beat (319ms) — starts in the same frame as the sheet, no rAF.
+
+    widgetEl.classList.add(config.exitClass);
+
+    // FIX PERF-LOG: longtasks agregados de esta ventana de salida
+    __ep_animPerfStart(widgetEl, widgetType, 'exit', widgetType === 'config' ? 170 : 319);
+
+    // Wait for animationend event
+    const onAnimationEnd = (e) => {
+      if (e.target !== widgetEl) return;
+      if (widgetEl.__ep_fluidToken !== token) return;
+      widgetEl.removeEventListener('animationend', onAnimationEnd);
+      // `.ep-hidden` goes FIRST: it hides the widget and kills its transition
+      // in the same style recalc. Removing the exit class first would let the
+      // content script's `opacity: 1 !important` win for one frame and the
+      // widget would visibly flash back in while fading out.
+      widgetEl.classList.add('ep-hidden');
+      widgetEl.style.display = 'none'; // FIX slot: fuera del flujo al terminar la salida (animationend y fallback)
+      widgetEl.classList.remove(config.exitClass);
+      // FIX stuck: si la salida interrumpió una ENTRADA en curso, su clase de enter
+      // queda huérfana (el timer de limpieza del enter sale por token guard). La
+      // salida también la retira — .ep-hidden+display:none ya la ocultan.
+      widgetEl.classList.remove(config.enterClass);
+      widgetEl.classList.remove('ep-anim');
+      widgetEl.style.willChange = '';
+      widgetEl.style.removeProperty('--ep-fmat');
+      // The cleanup must never block the promise: applyExclusiveWidget awaits
+      // it, so a throw here would freeze the whole widget switch.
+      try { __ep_cleanupStagger(widgetEl, widgetType); } catch {}
+      resolve();
+    };
+
+    widgetEl.addEventListener('animationend', onAnimationEnd);
+
+    // Fallback timeout in case animationend doesn't fire
+    const exitDuration = widgetType === 'config' ? 170 : 319;
+    setTimeout(() => {
+      widgetEl.removeEventListener('animationend', onAnimationEnd);
+      if (widgetEl.__ep_fluidToken !== token) {
+        resolve();
+        return;
+      }
+      widgetEl.classList.add('ep-hidden');
+      widgetEl.style.display = 'none'; // FIX slot: fuera del flujo al terminar la salida (animationend y fallback)
+      widgetEl.classList.remove(config.exitClass);
+      // FIX stuck: si la salida interrumpió una ENTRADA en curso, su clase de enter
+      // queda huérfana (el timer de limpieza del enter sale por token guard). La
+      // salida también la retira — .ep-hidden+display:none ya la ocultan.
+      widgetEl.classList.remove(config.enterClass);
+      widgetEl.classList.remove('ep-anim');
+      widgetEl.style.willChange = '';
+      widgetEl.style.removeProperty('--ep-fmat');
+      try { __ep_cleanupStagger(widgetEl, widgetType); } catch {}
+      resolve();
+    }, exitDuration + 150);
+  });
+}
+
+
+// FIX CAUSE 3: re-inits SPA pueden dejar mas de un .ep-wrapper/.ep-right-stack/widget
+// (getOrCreate* solo busca dentro de UN stack). Antes de cada toggle y de cada switch
+// exclusivo se deja SOLO la primera instancia de cada pieza en orden de documento
+// (el primer .ep-wrapper contiene el primer stack que contiene los widgets) y los
+// demas se eliminan del DOM. Al superviviente NO se le tocan sus clases ep-state-*.
+function __epCleanupWidgetDuplicates(){
+  const sels = ['.dues-container','.ep-schedule-widget','.ep-mail-widget','.ep-miuv-widget','.ep-config-widget','.ep-right-stack','.ep-wrapper'];
+  for (const sel of sels) {
+    try {
+      const els = document.querySelectorAll(sel);
+      for (let i = 1; i < els.length; i++) { try { els[i].remove(); } catch {} }
+    } catch {}
+  }
+}
+
+let __ep_exclusiveSeq = 0;
+async function applyExclusiveWidget(active, opts) {
+  try { __epCleanupWidgetDuplicates(); } catch {}
+  // FIX replay-animacion: si el widget pedido YA está activo, visible y es el único
+  // visible, esto es un no-op. El observer del toggle MiUV (applyState) y varios
+  // self-heals re-invocan en cada churn de Angular; sin guardia cada invocación
+  // re-añadía .ep-anim + enterClass y la apertura se re-reproducía sin cambiar nada.
+  try{
+    if (active !== 'hidden' && !(opts && opts.force) && active === getActiveWidget()) {
+      const _sel = ({ tasks:'.dues-container', schedule:'.ep-schedule-widget', mail:'.ep-mail-widget', miuv:'.ep-miuv-widget', config:'.ep-config-widget' })[active];
+      const _w = _sel ? document.querySelector(_sel) : null;
+      if (_w && !_w.classList.contains('ep-hidden') && _w.style.display !== 'none') {
+        const _others = document.querySelectorAll('.dues-container:not(.ep-hidden), .ep-schedule-widget:not(.ep-hidden), .ep-mail-widget:not(.ep-hidden), .ep-miuv-widget:not(.ep-hidden), .ep-config-widget:not(.ep-hidden)');
+        let _n = 0;
+        _others.forEach(e => { try{ if(e !== _w && !_w.contains(e)) _n++; }catch{} });
+        if (_n === 0) {
+          // Sincroniza el estado decorativo por si quedó desincronizado (sin animar)
+          try{ const _st = document.querySelector('.ep-right-stack'); if(_st){ ['ep-state-tasks','ep-state-schedule','ep-state-mail','ep-state-miuv','ep-state-config','ep-state-hidden'].forEach(c=>_st.classList.remove(c)); _st.classList.add('ep-state-' + active); } }catch{}
+          try{ const _wp = document.querySelector('.ep-wrapper'); if(_wp) _wp.classList.remove('ep-collapsed'); }catch{}
+          try{ __ep_btnIndicatorSync(active); }catch{}
+          return;
+        }
+      }
+    }
+  }catch{}
+  // FIX mitad-de-altura: el correctivo __ep_fixTasksHeights solo corría al FINAL de
+  // esta invocación; si esta carrera es superseded (doble click / restore en paralelo)
+  // se salta y el widget queda a media altura. Watchdog independiente del resultado:
+  // re-mide y limpia caps/heights inline viejos del stack, wrapper y lista.
+  if (active === 'tasks') {
+    setTimeout(()=>{ try{ __ep_fixTasksHeights(); }catch{} }, 650);
+    setTimeout(()=>{ try{ __ep_fixTasksHeights(); }catch{} }, 1600);
+  }
+  const seq = ++__ep_exclusiveSeq;
+  // FIX rapid-clicks: marca la intencion NUEVA al instante (antes de los awaits).
+  // Antes setActiveWidget corria SOLO tras los awaits (~500ms de animaciones); un click
+  // que llegaba en medio leia el widget VIEJO y el toggle lo interpretaba como "cerrar",
+  // dejando todo cerrado (ep-state-hidden) en secuencias rapidas tasks->schedule->tasks.
+  try { if (active !== 'hidden') setActiveWidget(active); } catch {}
   const _isCfgVisible = (function(){ const w=document.querySelector('.ep-config-widget'); return !!(w && w.style.display!=='none' && !w.classList.contains('ep-hidden')); })();
   const _isCfgActive = (function(){ try{return localStorage.getItem('ep_active_widget')==='config'}catch{return false} })();
   if((_isCfgActive || _isCfgVisible) && active!=='config' && !__ep_isUserAction() && __ep_isConfigOpening()){
@@ -11971,43 +14418,50 @@ function applyExclusiveWidget(active) {
   if(active !== 'hidden'){
     try{ if(typeof __ep_isList==='function' && !__ep_isList()){ setActiveWidget(active); __ep_softHideCourse(); return; } }catch{}
   }
+
   const stack = document.querySelector('.ep-right-stack');
+  let __ep_stackWasHidden = false;
   if (stack) {
+    __ep_stackWasHidden = stack.classList.contains('ep-state-hidden');
+    const _instantAE = !!(opts && opts.instant);
+    // FIX sync-beat: limpia restos inline de una animación de altura interrumpida
+    try { stack.style.transition = ''; stack.style.height = ''; stack.style.overflow = ''; } catch {}
+    // FIX leak: el guard instantáneo de una pasada anterior nunca se arrastra
+    try { document.querySelectorAll('.ep-instant').forEach(function (el) { el.classList.remove('ep-instant'); }); } catch {}
+    if (_instantAE) {
+      // FIX instant: restore/corrección ({instant:true}) no anima el tamaño del stack
+      stack.classList.add('ep-instant');
+      const _w0 = document.querySelector('.ep-wrapper');
+      if (_w0) _w0.classList.add('ep-instant');
+    }
     stack.classList.remove('ep-state-tasks', 'ep-state-schedule', 'ep-state-mail', 'ep-state-miuv', 'ep-state-config', 'ep-state-hidden');
     stack.classList.add('ep-state-' + active);
+    if (active !== 'hidden') {
+      // FIX sync-beat: ep-collapsed pinnaba max-width/flex a 0 durante TODA la
+      // entrada (el ancho saltaba al final). Se retira YA para que la expansión
+      // la animen las transiciones de tamaño del stack (375ms beat de entrada)
+      // y la altura inline (dos fases rAF en __ep_animateStackOpen).
+      const _w1 = document.querySelector('.ep-wrapper');
+      if (_w1) _w1.classList.remove('ep-collapsed');
+    }
+    if (_instantAE) {
+      // el guard vive 2 frames: el estado ya está aplicado, ninguna transición puede arrancar
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        try { stack.classList.remove('ep-instant'); } catch {}
+        const _w2 = document.querySelector('.ep-wrapper');
+        if (_w2) _w2.classList.remove('ep-instant');
+      }));
+    }
   }
-  const tasksList = document.querySelectorAll('.dues-container');
-  const schedList = document.querySelectorAll('.ep-schedule-widget');
-  const mailList = document.querySelectorAll('.ep-mail-widget');
-  const miuvList = document.querySelectorAll('.ep-miuv-widget');
-  const configList = document.querySelectorAll('.ep-config-widget');
+
   const arrow = document.querySelector('button.button_arrow_down') || document.querySelector('.ep-widget-toggle');
   const tasksBtn = document.querySelector('.ep-tasks-btn');
   const schedBtn = document.querySelector('.ep-schedule-btn');
   const mailBtnTop = document.querySelector('.ep-mail-btn');
   const miuvBtnTop = document.querySelector('.ep-miuv-btn');
   const cfgBtnTop = document.querySelector('.ep-config-btn');
-  // Fallback por si stack no existe aún (primera carga)
-  tasksList.forEach(el => {
-    if (active === 'tasks') el.classList.remove('ep-hidden');
-    else el.classList.add('ep-hidden');
-  });
-  schedList.forEach(el => {
-    if (active === 'schedule') el.classList.remove('ep-hidden');
-    else el.classList.add('ep-hidden');
-  });
-  mailList.forEach(el => {
-    if (active === 'mail') el.classList.remove('ep-hidden');
-    else el.classList.add('ep-hidden');
-  });
-  miuvList.forEach(el => {
-    if (active === 'miuv') el.classList.remove('ep-hidden');
-    else el.classList.add('ep-hidden');
-  });
-  configList.forEach(el => {
-    if (active === 'config') { el.classList.remove('ep-hidden'); el.style.display='flex'; el.style.flexDirection='column'; el.style.position='absolute'; el.style.inset='0'; el.style.zIndex='5'; el.style.opacity='1'; el.style.visibility='visible'; el.style.pointerEvents='auto'; }
-    else { el.classList.add('ep-hidden'); el.style.display='none'; }
-  });
+
+  // Update button/arrow states
   if (arrow) {
     if (active === 'schedule') { arrow.classList.add('ep-active'); arrow.title = 'Ocultar horario'; }
     else { arrow.classList.remove('ep-active'); arrow.title = 'Mostrar horario'; }
@@ -12032,16 +14486,174 @@ function applyExclusiveWidget(active) {
     if (active === 'config') { cfgBtnTop.classList.add('active', 'ep-active'); cfgBtnTop.style.background = ''; }
     else { cfgBtnTop.classList.remove('active', 'ep-active'); cfgBtnTop.style.background = ''; }
   }
+
+  // Widget elements
+  const tasksEl = document.querySelector('.dues-container');
+  const schedEl = document.querySelector('.ep-schedule-widget');
+  const mailEl = document.querySelector('.ep-mail-widget');
+  const miuvEl = document.querySelector('.ep-miuv-widget');
+  let configEl = document.querySelector('.ep-config-widget');
+  // FIX self-heal config: si config es el estado activo y el widget no existe (early-create
+  // falló, strip de login, Angular borró el shell), créalo AQUÍ — sin esto quedaba botón
+  // activo sin widget hasta el siguiente ciclo tardío.
+  if (active === 'config' && !configEl) {
+    try { console.log('[EP] self-heal: config activo sin widget → crear'); } catch {}
+    try { configEl = getOrCreateConfigWidget(); } catch {}
+  }
+
+  const widgetMap = {
+    tasks: { el: tasksEl, type: 'tasks' },
+    schedule: { el: schedEl, type: 'schedule' },
+    mail: { el: mailEl, type: 'mail' },
+    miuv: { el: miuvEl, type: 'miuv' },
+    config: { el: configEl, type: 'config' }
+  };
+
+  // First, hide all widgets that are not the active one
+  const hidePromises = [];
+  for (const [key, { el, type }] of Object.entries(widgetMap)) {
+    if (el && key !== active) {
+      hidePromises.push(hideWidget(el, type, opts));
+    }
+  }
+
+  // FIX freeze: muestra el widget activo EN PARALELO con las animaciones de salida.
+  // Antes se esperaban los hides (~320ms+) ANTES de mostrar nada -> cada cambio se trababa.
+  const activeWidget = widgetMap[active];
+  let __ep_showPromise = null;
+  if (activeWidget && activeWidget.el) {
+    const { el, type } = activeWidget;
+    if (type === 'config') {
+      // Config widget needs special display setup
+      el.style.display = 'flex';
+      el.style.flexDirection = 'column';
+      el.style.position = 'absolute';
+      el.style.inset = '0';
+      el.style.zIndex = '5';
+      el.style.opacity = '1';
+      el.style.visibility = 'visible';
+      el.style.pointerEvents = 'auto';
+    }
+    // Se lanza SIN await: la parte síncrona de showWidget restaura el display,
+    // así el target de altura del stack es medible ANTES del beat de entrada.
+    __ep_showPromise = showWidget(el, type, opts);
+    // FIX sync-beat: al abrir desde ep-state-hidden la ALTURA del stack crece en
+    // el beat de entrada (375ms, dos fases rAF inline), no en 1 frame. El ancho
+    // ya lo anima la transición CSS del stack (max-width/flex-basis).
+    if (stack && __ep_stackWasHidden && !(opts && opts.instant) && !__ep_prefersReducedMotion()) {
+      try { __ep_animateStackOpen(stack); } catch {}
+    }
+  }
+  await Promise.all([__ep_showPromise, ...hidePromises]);
+  // FIX carreras: una invocacion mas nueva (click rapido en otro boton) sustituye a esta;
+  // el ganador corrige las clases de estado/botones tras SUS awaits.
+  if (seq !== __ep_exclusiveSeq) { console.log('[EP] applyExclusiveWidget seq ' + seq + ' superseded'); return; }
+
   setActiveWidget(active);
   try { __ep_btnIndicatorSync(active); } catch {}
+
+  // FIX CAUSE C: tareas a media altura — los caps de max-height inline se fijaban
+  // al crear el shell y convivían con medidas tomadas con el widget display:none
+  // (altura 0) o de un viewport anterior. Tras el show (display ya restaurado) se
+  // recalculan contra el viewport ACTUAL y se limpian caps inline viejos.
+  if (active === 'tasks') { try { __ep_fixTasksHeights(); } catch {} }
+
+  // Cleanup duplicate tasks containers
+  const tasksList = document.querySelectorAll('.dues-container');
   if (tasksList.length > 1) {
     tasksList.forEach((el, i) => { if (i > 0) el.remove(); });
   }
+
   const wrapper = document.querySelector('.ep-wrapper');
   if (wrapper) wrapper.classList.remove('ep-collapsed');
 }
+// FIX sync-beat: al abrir desde ep-state-hidden, max-height no interpola (0<->none),
+// así que la ALTURA se anima inline en dos fases rAF (medir -> pin 0 -> reflow ->
+// target px) durante el beat de entrada (375ms, curva de hoja). El ANCHO lo anima
+// la transición CSS del stack (max-width/flex-basis). Solo propiedades de tamaño,
+// nunca opacity/transform/filter. Instant paths NO llaman aquí; además se autolimpia
+// (transitionend o timeout) y applyExclusiveWidget limpia los restos al empezar.
+function __ep_animateStackOpen(stack) {
+  try {
+    if (!stack || stack.classList.contains('ep-instant')) return;
+    if (__ep_prefersReducedMotion()) return;
+    // Target medido con el display del widget YA restaurado (showWidget síncrono)
+    const target = stack.offsetHeight;
+    if (!target || target <= 0) return;
+    // pin de inicio + reflow para que la transición arranque desde 0px real
+    stack.style.height = '0px';
+    stack.style.overflow = 'hidden';
+    void stack.offsetHeight;
+    // FIX sync-beat: la transición inline DEBE incluir las propiedades de tamaño
+    // (flex-basis/max-width/min-width/margin-left) — un inline "height" a secas
+    // REEMPLAZA la lista del stylesheet y CANCELA las transiciones de ancho ya
+    // en marcha (propiedad fuera de la lista = cancel + snap): el ancho saltaba
+    // de golpe al abrir. Mismo beat de entrada (375ms, curva de hoja) para todo.
+    stack.style.transition = 'height 375ms cubic-bezier(0.28, 0.68, 0.28, 1.08), flex-basis 375ms cubic-bezier(0.28, 0.68, 0.28, 1.08), max-width 375ms cubic-bezier(0.28, 0.68, 0.28, 1.08), min-width 375ms cubic-bezier(0.28, 0.68, 0.28, 1.08), margin-left 375ms cubic-bezier(0.28, 0.68, 0.28, 1.08)';
+    stack.style.height = target + 'px';
+    let __done = false;
+    const finish = () => {
+      if (__done) return;
+      __done = true;
+      try { stack.removeEventListener('transitionend', onEnd); } catch {}
+      try { clearTimeout(timer); } catch {}
+      try { stack.style.transition = ''; stack.style.height = ''; stack.style.overflow = ''; } catch {}
+    };
+    const onEnd = (e) => { if (e.target === stack && e.propertyName === 'height') finish(); };
+    stack.addEventListener('transitionend', onEnd);
+    const timer = setTimeout(finish, 375 + 150);
+  } catch {}
+}
+// FIX CAUSE C: widget de tareas a media altura. Los max-height inline del wrapper
+// (injectPendingActivitiesWidget/ensureEpShell/mountListSidePanel) se fijan al crear
+// el shell y pueden quedar como un valor viejo medido con el widget display:none
+// (altura 0) o en un viewport anterior — al reabrir tareas el contenido queda
+// recortado ("a la mitad"). Tras el show (display ya restaurado) se recalcula el
+// cap del wrapper contra el viewport ACTUAL y se limpia cualquier cap inline viejo
+// en stack/contenedor/lista interna, para que se re-midan del layout vivo y no del
+// estado oculto. La lista interna (.acts-list) recupera su holgura completa cuando
+// su contenido la desborda (sigue con overflow-y:auto, no cambia el diseño).
+function __ep_fixTasksHeights() {
+  try {
+    const dues = document.querySelector('.dues-container');
+    if (!dues || dues.classList.contains('ep-hidden')) return;
+    // doble rAF: el primero garantiza el display restaurado aplicado, el segundo
+    // re-mide con el layout ya asentado (post-show, nunca cache del estado oculto)
+    requestAnimationFrame(() => { requestAnimationFrame(() => {
+      try {
+        const d = document.querySelector('.dues-container');
+        if (!d || d.classList.contains('ep-hidden')) return;
+        const w = d.closest('.ep-wrapper') || document.querySelector('.ep-wrapper');
+        if (w) {
+          // misma fórmula del diseño, recalculada contra el viewport actual
+          // (la variante sticky del panel lateral usa otra holgura)
+          w.style.maxHeight = (w.style.position === 'sticky') ? 'calc(100vh - 30px)' : 'calc(100vh - 90px)';
+        }
+        const stack = d.closest('.ep-right-stack');
+        if (stack) { stack.style.maxHeight = ''; stack.style.height = ''; }
+        d.style.maxHeight = '';
+        d.style.height = '';
+        const list = d.querySelector('.acts-list');
+        if (list) {
+          list.style.maxHeight = '';
+          list.style.height = '';
+          try {
+            const capY = list.clientHeight;
+            if (list.scrollHeight > capY + 4) {
+              // contenido interno más alto que el cap → expande al margen del
+              // wrapper (viewport actual) para no dejar el widget a media altura
+              list.style.setProperty('max-height', 'calc(100vh - 90px)', 'important');
+            }
+          } catch {}
+        }
+      } catch {}
+    }); });
+  } catch {}
+}
 function toggleScheduleWidget() {
+  __ep_prePromoteSheet('schedule'); // FIX MAIL-PERF GPU: promoción pre-animación
   try{ __ep_markUserAction(); }catch{}
+  try{ __epCleanupWidgetDuplicates(); }catch{}
   const current = getActiveWidget();
   if (current === 'schedule') {
     applyExclusiveWidget('tasks');
@@ -12052,8 +14664,42 @@ function toggleScheduleWidget() {
     if (w && !w.dataset.loaded) loadScheduleIndependent();
   }
 }
+// FIX MAIL-PERF (plan 678879b6): prefetch del buzón en pointerdown del botón de
+// correo — los mensajes llegan DURANTE la animación de entrada (~375ms) en vez de
+// después, así el render aplazado a animationend ya pinta la lista real.
+// Idempotente: un solo prefetch en vuelo por carpeta y TTL de 90s sobre el cache.
+function __ep_mailPrefetch(folder = 1) {
+  try {
+    const flag = '__ep_mailPrefetchBusy_' + folder;
+    if (window[flag]) return;
+    const tok = localStorage.getItem('accessToken');
+    if (!tok) return;
+    try {
+      const raw = localStorage.getItem('ep_mail_cache_' + folder);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed.messages) && parsed.messages.length && Date.now() - parsed.ts < 90000) return;
+      }
+    } catch {}
+    window[flag] = true;
+    const release = () => { try { window[flag] = false; } catch {} };
+    fetchMessages(tok, folder).then(msgs => {
+      try {
+        if (Array.isArray(msgs) && msgs.length) {
+          const marked = getMarkedReadIds(folder);
+          const s = new Set(marked.map(String));
+          const merged = msgs.map(m => s.has(String(m.idMensaje)) ? { ...m, leido: 1 } : m);
+          localStorage.setItem('ep_mail_cache_' + folder, JSON.stringify({ messages: merged, ts: Date.now() }));
+          localStorage.setItem('ep_mail_last_count_' + folder, String(merged.length));
+        }
+      } catch {}
+    }).catch(() => {}).then(release);
+  } catch {}
+}
 function toggleMailWidget() {
+  __ep_prePromoteSheet('mail'); // FIX MAIL-PERF GPU: promoción pre-animación (pointerdown llega aquí al instante)
   try{ __ep_markUserAction(); }catch{}
+  try{ __epCleanupWidgetDuplicates(); }catch{}
   const current = getActiveWidget();
   if (current === 'mail') {
     applyExclusiveWidget('tasks');
@@ -12549,6 +15195,70 @@ async function loadMailIndependent(bearerToken, folder = 1, isToggle = false) {
   const body = widget.querySelector('.ep-mail-widget-body');
   const headerCount = widget.querySelector('.ep-mail-widget-count');
   if (!body) return;
+  // FIX MAIL-PERF (plan 678879b6): la entrada animada de la hoja dura ~375ms y el
+  // render pesado de la lista (items + avatares) caía DENTRO de esa ventana,
+  // bloqueando el hilo principal (tirón al abrir/cerrar 'Mensajes'). El render se
+  // APLAZA a animationend (el loader sigue visible durante la hoja — su markup no
+  // se toca, solo el CUANDO); fuera de la ventana corre al instante (instant,
+  // reduced-motion, re-renders ya asentados). Anti-race idempotente: la ÚLTIMA
+  // renderización pendiente gana y cada una re-valida el seq/carpeta al ejecutarse.
+  // FIX MAIL-PERF 3 (plan 678879b6): el flush (animationend + 2 rAF) RE-VALIDA el
+  // estado en el momento de ejecutarse: si el widget quedó oculto/superseded o hay
+  // CUALQUIER .ep-anim vivo en la página (otro widget animando), el render se
+  // re-aplaza con un poll de calma — nunca aterriza dentro de la ventana de
+  // animación de OTRO widget (escenario: abrir mail y pulsar otro botón <375ms).
+  // Secuencia monótona por widget: last-pending-wins también entre llamadas que
+  // llegan durante el poll; si el mail se reabre más tarde, el poll detecta calma
+  // y renderiza entonces (lista lista para cuando el usuario mira).
+  const __epDeferMailRender = (fn) => {
+    const seq = (widget.__ep_mailRenderSeq = (widget.__ep_mailRenderSeq || 0) + 1);
+    const job = { fn, seq };
+    const isCurrent = (j) => j && j.seq === widget.__ep_mailRenderSeq;
+    const runJob = (j) => { try { j.fn(); } catch (e) { console.error('[EP MAIL-PERF] render aplazado', e); } };
+    const flushWhenCalm = (j, attempt) => {
+      if (!isCurrent(j)) return; // superseded: una renderización más nueva gana
+      let calm = true;
+      try {
+        const hidden = widget.classList.contains('ep-hidden') || widget.style.display === 'none';
+        const active = (typeof getActiveWidget === 'function') ? getActiveWidget() : 'mail';
+        const anyAnim = !!document.querySelector('.ep-anim');
+        const entering = widget.classList.contains('animate-fluid-enter');
+        if (hidden || active !== 'mail' || anyAnim || entering) calm = false;
+      } catch { calm = true; }
+      if (!calm) {
+        // re-aplaza: poll de calma (60ms). Cap de seguridad ~3s: pasada la ventana
+        // de cualquier widget, renderiza aunque esté oculto (render en display:none
+        // no pinta) para que la lista siga caliente para la próxima apertura.
+        if ((attempt | 0) < 50) { setTimeout(() => flushWhenCalm(j, (attempt | 0) + 1), 60); }
+        else { runJob(j); }
+        return;
+      }
+      // FIX MAIL-PERF: el render NO corre en la misma tarea que animationend
+      // (ahí viven la limpieza de clases y el snap de altura del stack) — se
+      // empuja 2 frames para que el settle quede ligero y el pop-in de la
+      // lista llegue en una tarea propia, ya fuera del beat de la hoja.
+      try { requestAnimationFrame(() => requestAnimationFrame(() => { if (isCurrent(j)) runJob(j); })); }
+      catch { try { if (isCurrent(j)) runJob(j); } catch {} }
+    };
+    try {
+      if (!widget.classList.contains('animate-fluid-enter')) { flushWhenCalm(job, 0); return; }
+      widget.__ep_mailPendingRender = job; // la última gana
+      if (widget.__ep_mailRenderGate) return;
+      widget.__ep_mailRenderGate = true;
+      let done = false;
+      const onEnd = (e) => { if (e.target === widget) finish(); };
+      const finish = () => {
+        if (done) return; done = true;
+        widget.__ep_mailRenderGate = false;
+        try { widget.removeEventListener('animationend', onEnd); } catch {}
+        try { clearTimeout(timer); } catch {}
+        const j = widget.__ep_mailPendingRender; widget.__ep_mailPendingRender = null;
+        if (j) flushWhenCalm(j, 0);
+      };
+      widget.addEventListener('animationend', onEnd);
+      const timer = setTimeout(finish, 375 + 150);
+    } catch { flushWhenCalm(job, 0); }
+  };
   // FIX SISTÉMICO: seq anti-race — evita que un fetch lento de Enviados sobrescriba el render fresco de Recibidos al togglear rápido
   const _seq = (parseInt(widget.dataset.mailSeq || '0', 10) + 1) % 100000;
   widget.dataset.mailSeq = String(_seq);
@@ -12582,7 +15292,7 @@ async function loadMailIndependent(bearerToken, folder = 1, isToggle = false) {
     const raw = localStorage.getItem(cacheKey);
     if (raw) {
       const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed.messages) && Date.now() - parsed.ts < 5*60*1000) {
+      if (Array.isArray(parsed.messages) && Date.now() - parsed.ts < 24*60*60*1000) {
         cachedMessages = parsed.messages;
         // FIX KILL-SWITCH: durante toggle Enviados→Recibidos no aplicar overlay contaminado — restaura snapshot si existe
         if (isToggle && folder===1 && __ep_isToggling() && window.__ep_mail_inbox_snapshot) {
@@ -12847,16 +15557,28 @@ async function loadMailIndependent(bearerToken, folder = 1, isToggle = false) {
         else { headerCount.innerHTML = `<span class="cnt-total">${msgs.length} mensajes</span>`; headerCount.classList.remove('has-unread'); headerCount.dataset.hasUnread='0'; }
         headerCount.style.background=''; headerCount.style.borderColor=''; headerCount.style.color='';
       }
-      const bar = document.querySelector('.ep-mail-bar'); if (bar){ const b=bar.querySelector('.ep-mail-badge'); if(b) b.style.display='none'; const btn=bar.querySelector('.ep-mail-btn'); if(btn) btn.classList.remove('has-unread'); }
+      const bar = document.querySelector('.ep-mail-bar'); if (bar){ const b=bar.querySelector('.ep-mail-badge'); if(b) b.style.setProperty('display','none','important'); const btn=bar.querySelector('.ep-mail-btn'); if(btn) btn.classList.remove('has-unread'); }
       unreadBtn.textContent = `No leídos (0)`; unreadBtn.classList.remove('active'); filterUnread=false; markReadBtn.disabled=true;
       const prev = markReadBtn.innerHTML; markReadBtn.innerHTML='<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg><span>¡Hecho!</span>'; try{ navigator.vibrate?.(10);}catch{} renderFiltered(); setTimeout(()=>{ markReadBtn.innerHTML=prev; }, 1400); try{ if(bar) loadMailBadge(bearerToken, bar); }catch{}
     });
     centerBtn.addEventListener('pointerdown', (e) => { if (e.button!==0) return; e.preventDefault(); e.stopPropagation(); try{ centerBtn.setPointerCapture(e.pointerId);}catch{} centerBtn.style.transform='scale(0.96)'; });
+    // FIX MAIL-PERF (plan 678879b6 correctivo): el render aplazado de cache debía pintar
+    // la lista al ejecutarse — antes solo construía filtros + contenedor vacío (la lista
+    // quedaba en blanco en apertura cálida hasta que el fetch fresco re-renderizaba).
+    // Igual que el render fresco: renderFiltered() es idempotente (resetea list.innerHTML
+    // y reconstruye), corre dentro del run aplazado (ya fuera de la ventana de animación).
+    renderFiltered();
   };
   // FIX: toggle 2→1 confía en el servidor + overlay explícito (nada se fuerza a no leído)
   // FIX: la verdad del servidor manda — solo se suma el overlay explícito (línea 10607); nada se fuerza a no leído
   if (cachedMessages && cachedMessages.length) {
-    doRenderMail(cachedMessages);
+    // FIX MAIL-PERF: render de cache aplazado a animationend (re-valida seq/carpeta)
+    __epDeferMailRender(() => {
+      try {
+        if (widget.dataset.mailSeq !== String(_seq) || widget.dataset.folder !== String(folder)) { console.log('[EP MAIL-PERF] render cache aplazado descartado (seq/carpeta cambiaron)'); return; }
+        doRenderMail(cachedMessages);
+      } catch (e) { console.error('[EP MAIL-PERF] render cache', e); }
+    });
   } else {
     body.innerHTML = '<div class="skeleton-cards" aria-hidden="true"><div class="skeleton-card"><div style="display:flex;gap:10px;align-items:center"><div style="width:32px;height:32px;border-radius:50%;background:#f1f5f9;flex-shrink:0"></div><div style="flex:1;display:flex;flex-direction:column;gap:6px"><div class="skeleton-line medium"></div><div class="skeleton-line short"></div></div></div><div class="skeleton-line long"></div></div><div class="skeleton-card"><div style="display:flex;gap:10px;align-items:center"><div style="width:32px;height:32px;border-radius:50%;background:#f1f5f9"></div><div style="flex:1;display:flex;flex-direction:column;gap:6px"><div class="skeleton-line medium"></div><div class="skeleton-line short"></div></div></div><div class="skeleton-line long"></div></div><div class="skeleton-card"><div style="display:flex;gap:10px;align-items:center"><div style="width:32px;height:32px;border-radius:50%;background:#f1f5f9"></div><div style="flex:1;display:flex;flex-direction:column;gap:6px"><div class="skeleton-line medium"></div><div class="skeleton-line short"></div></div></div><div class="skeleton-line long"></div></div></div>';
   }
@@ -12891,6 +15613,11 @@ async function loadMailIndependent(bearerToken, folder = 1, isToggle = false) {
     try{ localStorage.setItem('ep_mail_last_count_' + folder, String(messages.length)); }catch{}
     // FIX H2 SISTÉMICO: persiste cache fresco — antes nunca se guardaba y quedaba stale, causando re-render corrupto en reload
     try{ localStorage.setItem(cacheKey, JSON.stringify({messages, ts: Date.now()})); }catch{}
+    // FIX MAIL-PERF: el render fresco (lista + avatares) se aplaza a animationend
+    // si aún estamos dentro de la ventana de la animación de entrada; si el fetch
+    // ya aterrizó fuera de la ventana, corre al instante como siempre.
+    __epDeferMailRender(() => {
+      try { if (widget.dataset.mailSeq !== String(_seq) || widget.dataset.folder !== String(folder)) { console.log('[EP MAIL-PERF] render fresco aplazado descartado (seq/carpeta cambiaron)'); return; } } catch {}
     const unread = messages.filter(m => __ep_isKeepUnread(m));
     if (headerCount) {
       if (folder === 2) {
@@ -13205,7 +15932,7 @@ async function loadMailIndependent(bearerToken, folder = 1, isToggle = false) {
         headerCount.style.background=''; headerCount.style.borderColor=''; headerCount.style.color='';
       }
       const bar = document.querySelector('.ep-mail-bar');
-      if (bar){ const b=bar.querySelector('.ep-mail-badge'); if(b) b.style.display='none'; const btn=bar.querySelector('.ep-mail-btn'); if(btn) btn.classList.remove('has-unread'); }
+      if (bar){ const b=bar.querySelector('.ep-mail-badge'); if(b) b.style.setProperty('display','none','important'); const btn=bar.querySelector('.ep-mail-btn'); if(btn) btn.classList.remove('has-unread'); }
       unreadBtn.textContent = `No leídos (0)`; unreadBtn.classList.remove('active'); filterUnread=false;
       markReadBtn.disabled=true;
       const prev = markReadBtn.innerHTML;
@@ -13216,6 +15943,7 @@ async function loadMailIndependent(bearerToken, folder = 1, isToggle = false) {
       try{ if(bar) loadMailBadge(bearerToken, bar); }catch{}
     });
     renderFiltered();
+    }); // fin __epDeferMailRender (render fresco aplazado)
   } catch (err) {
     console.error('loadMailIndependent error', err);
     body.innerHTML = '<div class="error-message" style="color:#ef4444;text-align:center;padding:24px;">Error al cargar mensajes</div>';
@@ -13626,6 +16354,283 @@ function renderErrorMessage(container, loader) {
 }
 
 /**
+ * Sets up drag-to-dismiss for dues-container
+ * Uses pointer events for unified touch/mouse handling with momentum spring exit
+ */
+function setupDragToDismiss(duesContainer) {
+  const header = duesContainer.querySelector('.container-header');
+  if (!header) return;
+
+  let startY = 0;
+  let currentY = 0;
+  let startTime = 0;
+  let lastY = 0;
+  let lastTime = 0;
+  let isDragging = false;
+  let dragCancelled = false;
+  let animationFrameId = null;
+
+  // Check for reduced motion preference
+  const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // Apply will-change for GPU acceleration during drag
+  function enableDragOptimization() {
+    // `.ep-anim` hands `transform` to the fluid channel so the stack's
+    // `transform: … !important` can no longer cancel the gesture.
+    duesContainer.classList.add('ep-anim');
+    // A running CSS animation would keep overriding the channel value the
+    // gesture writes, so the enter/exit animation has to go first.
+    duesContainer.classList.remove('animate-fluid-enter', 'animate-fluid-exit');
+    duesContainer.style.willChange = 'transform';
+    duesContainer.style.backfaceVisibility = 'hidden';
+  }
+
+  function disableDragOptimization() {
+    duesContainer.style.willChange = '';
+    duesContainer.style.backfaceVisibility = '';
+  }
+
+  // Calculate velocity from last few samples
+  function calculateVelocity() {
+    const timeDelta = Date.now() - lastTime;
+    if (timeDelta > 0 && timeDelta < 100) {
+      return (currentY - lastY) / (timeDelta / 1000); // px/s
+    }
+    return 0;
+  }
+
+  // Rubber-band resistance function (iOS-like)
+  function applyRubberBand(deltaY) {
+    if (deltaY <= 0) return deltaY; // No resistance when dragging down
+    // Rubber-band: logarithmic resistance
+    const threshold = 150; // px where resistance becomes strong
+    return threshold * Math.log(1 + deltaY / threshold);
+  }
+
+  // Update transform during drag
+  function updateTransform(deltaY) {
+    const clampedDelta = deltaY > 0 ? applyRubberBand(deltaY) : deltaY;
+    duesContainer.style.setProperty('--ep-fy', clampedDelta + 'px');
+  }
+
+  // Snap back with rubber-band animation
+  function snapBack() {
+    disableDragOptimization();
+    if (prefersReducedMotion) {
+      duesContainer.style.removeProperty('--ep-fy');
+      duesContainer.classList.remove('ep-anim');
+      return;
+    }
+    const currentFy = duesContainer.style.getPropertyValue('--ep-fy') || '0px';
+
+    // Use CSS animation for snap-back
+    duesContainer.style.setProperty('--ep-drag-y', currentFy.trim());
+    duesContainer.classList.add('animate-fluid-rubber-snap');
+
+    const cleanup = () => {
+      duesContainer.classList.remove('animate-fluid-rubber-snap');
+      duesContainer.style.removeProperty('--ep-fy');
+      duesContainer.style.removeProperty('--ep-drag-y');
+      duesContainer.classList.remove('ep-anim');
+      duesContainer.removeEventListener('animationend', cleanup);
+    };
+    duesContainer.addEventListener('animationend', cleanup);
+    setTimeout(cleanup, 500);
+  }
+
+  // Dismiss with momentum spring using captured velocity (Web Animations API for true velocity handoff)
+  function dismissWithMomentum(velocity) {
+    disableDragOptimization();
+    if (prefersReducedMotion) {
+      hideWidget(duesContainer, 'tasks').catch(() => {});
+      return;
+    }
+
+    // Current drag position from the channel
+    const currentFy = parseFloat(duesContainer.style.getPropertyValue('--ep-fy')) || 0;
+
+    // Target: translateY(100%) = off-screen (element height)
+    const targetY = '100%';
+
+    // Calculate animation duration based on velocity (no distance needed for percentage target)
+    // Spring physics approximation: higher velocity = shorter duration
+    // Clamp to reasonable bounds (200-500ms) for iOS-like feel
+    const absVelocity = Math.abs(velocity);
+    let duration = 350; // default matching CSS
+    if (absVelocity > 0) {
+      // Approximate duration based on velocity alone
+      // Higher velocity = shorter duration
+      duration = Math.max(200, Math.min(500, 350 * (500 / Math.max(100, absVelocity))));
+    }
+
+    // Use Web Animations API on the fluid channel for velocity handoff.
+    // Animating the channel (instead of `transform`) keeps the gesture alive
+    // even though the stack declares `transform` with `!important`.
+    const animation = duesContainer.animate(
+      [
+        { '--ep-fy': currentFy + 'px', '--ep-fo': 1, '--ep-fmat': 1 },
+        { '--ep-fy': targetY, '--ep-fo': 0, '--ep-fmat': 0 }
+      ],
+      {
+        duration: duration,
+        easing: 'cubic-bezier(0.22, 0.61, 0.22, 1.15)', // momentum spring
+        fill: 'forwards'
+      }
+    );
+
+    const finish = () => {
+      duesContainer.__ep_dismissAnimation = null;
+      try { animation.cancel(); } catch {}
+      duesContainer.classList.remove('ep-anim', 'animate-fluid-momentum-exit');
+      duesContainer.style.removeProperty('--ep-fy');
+      duesContainer.style.removeProperty('--ep-fo');
+      duesContainer.style.removeProperty('--ep-fmat');
+      duesContainer.classList.add('ep-hidden');
+      // Collapse the stack so the column does not stay empty
+      try {
+        const stack = document.querySelector('.ep-right-stack');
+        if (stack) {
+          stack.classList.remove('ep-state-tasks', 'ep-state-schedule', 'ep-state-mail', 'ep-state-miuv', 'ep-state-config');
+          stack.classList.add('ep-state-hidden');
+        }
+        const wrapper = document.querySelector('.ep-wrapper');
+        if (wrapper) wrapper.classList.add('ep-collapsed');
+        localStorage.setItem('ep_active_widget', 'hidden');
+      } catch {}
+    };
+
+    animation.onfinish = finish;
+    animation.oncancel = () => {
+      if (duesContainer.__ep_dismissAnimation !== animation) return;
+      finish();
+    };
+
+    // Store animation reference for potential cleanup
+    duesContainer.__ep_dismissAnimation = animation;
+  }
+
+  // Pointer down handler
+  function onPointerDown(e) {
+    // Ignore if clicking on interactive elements
+    if (e.target.closest('.dropdown-container, .dropdown-button, .dropdown-menu, .subject-filter-dropdown, button, input, a, [role="button"]')) {
+      return;
+    }
+    // Only handle primary pointer (left click, touch, pen)
+    if (e.button !== 0 && e.buttons !== 1 && e.pointerType !== 'touch') return;
+    
+    isDragging = true;
+    dragCancelled = false;
+    startY = e.clientY;
+    currentY = startY;
+    lastY = startY;
+    startTime = Date.now();
+    lastTime = startTime;
+    
+    enableDragOptimization();
+    
+    // Prevent text selection during drag
+    e.preventDefault();
+    
+    // Bind pointer move/up to document for continuation outside header
+    document.addEventListener('pointermove', onPointerMove, { passive: false });
+    document.addEventListener('pointerup', onPointerUp);
+    document.addEventListener('pointercancel', onPointerCancel);
+    document.addEventListener('keydown', onKeyDown);
+  }
+
+  // Pointer move handler
+  function onPointerMove(e) {
+    if (!isDragging) return;
+    
+    currentY = e.clientY;
+    const now = Date.now();
+    const deltaY = currentY - startY;
+    
+    // Only track velocity for downward drag (dismiss direction)
+    if (deltaY > 0) {
+      lastY = currentY;
+      lastTime = now;
+    }
+    
+    updateTransform(deltaY);
+  }
+
+  // Pointer up handler
+  function onPointerUp(e) {
+    if (!isDragging) return;
+    
+    document.removeEventListener('pointermove', onPointerMove);
+    document.removeEventListener('pointerup', onPointerUp);
+    document.removeEventListener('pointercancel', onPointerCancel);
+    document.removeEventListener('keydown', onKeyDown);
+    
+    const deltaY = currentY - startY;
+    const velocity = calculateVelocity();
+    const dragDuration = Date.now() - startTime;
+    // The widget follows a rubber-banded offset, so the decision has to use
+    // that same offset: what the user sees is what decides the dismissal.
+    const visualDelta = deltaY > 0 ? applyRubberBand(deltaY) : deltaY;
+    
+    isDragging = false;
+    
+    // Dismiss if: velocity > 500px/s OR drag distance > 100px (and dragged down)
+    if (visualDelta > 100 || velocity > 500) {
+      dismissWithMomentum(velocity);
+    } else {
+      snapBack();
+    }
+  }
+
+  // Pointer cancel handler
+  function onPointerCancel(e) {
+    if (!isDragging) return;
+    
+    document.removeEventListener('pointermove', onPointerMove);
+    document.removeEventListener('pointerup', onPointerUp);
+    document.removeEventListener('pointercancel', onPointerCancel);
+    document.removeEventListener('keydown', onKeyDown);
+    
+    isDragging = false;
+    dragCancelled = true;
+    snapBack();
+  }
+
+  // ESC key to cancel drag
+  function onKeyDown(e) {
+    if (e.key === 'Escape' && isDragging) {
+      dragCancelled = true;
+      onPointerCancel(e);
+    }
+  }
+
+  // Attach pointerdown to header
+  header.addEventListener('pointerdown', onPointerDown, { passive: false });
+  
+  // Store cleanup function on element for later removal
+  duesContainer.__ep_dragCleanup = () => {
+    header.removeEventListener('pointerdown', onPointerDown);
+    document.removeEventListener('pointermove', onPointerMove);
+    document.removeEventListener('pointerup', onPointerUp);
+    document.removeEventListener('pointercancel', onPointerCancel);
+    document.removeEventListener('keydown', onKeyDown);
+    if (animationFrameId) cancelAnimationFrame(animationFrameId);
+    // Cancel any ongoing dismissal animation. The reference is cleared first so
+    // the `oncancel` handler does not treat this as a completed dismissal.
+    if (duesContainer.__ep_dismissAnimation) {
+      const anim = duesContainer.__ep_dismissAnimation;
+      duesContainer.__ep_dismissAnimation = null;
+      try { anim.cancel(); } catch {}
+    }
+    disableDragOptimization();
+    duesContainer.classList.remove('ep-anim', 'animate-fluid-rubber-snap', 'animate-fluid-momentum-exit');
+    duesContainer.style.removeProperty('--ep-fy');
+    duesContainer.style.removeProperty('--ep-fo');
+    duesContainer.style.removeProperty('--ep-fmat');
+    duesContainer.style.removeProperty('--ep-drag-y');
+  };
+}
+
+/**
  * Creates and injects the pending activities widget
  */
 function injectPendingActivitiesWidget(force) {
@@ -13662,7 +16667,12 @@ function injectPendingActivitiesWidget(force) {
   // En list bajo demanda el shell lo crea mountListSidePanel (lateral, no flotante).
   let wrapper = document.querySelector(".ep-wrapper");
   if (wrapper && !wrapper.isConnected) { try { wrapper.remove(); } catch {} wrapper = null; }
-  if (wrapper && wrapper.querySelector('.dues-container')) return; // dues ya montado
+  if (wrapper && wrapper.querySelector('.dues-container')) {
+    // FIX CAUSE C: re-invocación con dues ya montado (p.ej. force) — no re-renderiza,
+    // pero SÍ repara las alturas medidas mientras el widget estaba oculto.
+    try { __ep_fixTasksHeights(); } catch {}
+    return; // dues ya montado
+  }
   if (!wrapper && force) { try { if (__ep_isList()) wrapper = mountListSidePanel(); } catch {} }
   if (!wrapper) {
   // Create wrapper — fixed flotante ep-wrapper, no busca targetContainer, no toca _ngcontent
@@ -13693,6 +16703,11 @@ function injectPendingActivitiesWidget(force) {
   // Create pending activities container — FIX: inicia oculto, doble click para mostrar
   const duesContainer = document.createElement("div");
   duesContainer.classList.add("dues-container", "ep-hidden");
+  // FIX dark-login: nace con ep-dark si el modo oscuro ya está activo (igual que
+  // horario/correo/MiUV). Sin esto, el widget recién montado en login quedaba hasta
+  // 15s sin la clase (applyEpConfig ya había corrido) y el CSS fluido le daba el
+  // vidrio blanco translúcido en vez del fondo negro rgba(16,24,40,…).
+  try{ if(loadEpConfig().dark) duesContainer.classList.add('ep-dark'); }catch{}
 
   // Create loader container
   const loaderContainer = document.createElement("div");
@@ -13714,17 +16729,22 @@ function injectPendingActivitiesWidget(force) {
   } catch { try { wrapper.appendChild(duesContainer); } catch {} }
   // FIX: Doble click SOLO en header oculta widget (antes cualquier seleccion de texto lo cerraba
   // y persistia 'hidden' entre recargas -> el widget "a veces no aparecia")
-  duesContainer.addEventListener('dblclick', (e) => {
+  duesContainer.addEventListener('dblclick', async (e) => {
     if (e.target.closest('.dropdown-container')) return;
     if (!e.target.closest('.container-header')) return;
     e.preventDefault();
     try{ console.log('[EP] widget ocultado por doble-click en header'); }catch{}
-    hideAllWidgets();
+    await hideAllWidgets();
   });
 
   // Shell completo SIEMPRE (con o sin token): header + skeleton al instante
   currentContentType = currentContentType || 'activities';
   try{ setupContentContainer(duesContainer, loaderContainer, loader); }catch{}
+  // Modo vista (plan 678879b6): aplica ep-view-* desde la creación del widget
+  try{ __ep_applyViewMode(); }catch{}
+
+  // Drag-to-dismiss for dues-container
+  try { setupDragToDismiss(duesContainer); } catch {}
 
   // Get authentication token
   const accessToken = localStorage.getItem("accessToken");
@@ -13743,6 +16763,7 @@ function injectPendingActivitiesWidget(force) {
             clearInterval(_iv);
             try{ __ep_log('token→load'); }catch{}
             if(!window.__ep_loadingActivities) loadActivitiesContent(_t);
+            try{ __ep_prefetchTasksCounts(); }catch{}
           }
           else if(++_tries >= 20){ clearInterval(_iv); }
         }catch{ try{ clearInterval(_iv); }catch{} }
@@ -13750,6 +16771,7 @@ function injectPendingActivitiesWidget(force) {
     }catch{}
   } else {
     loadActivitiesContent(accessToken);
+    try{ __ep_prefetchTasksCounts(); }catch{}
   }
 
   // FIX primero-si-o-si: al crear, visible de inmediato si tareas es el activo.
@@ -13759,7 +16781,11 @@ function injectPendingActivitiesWidget(force) {
     try{ _act0 = localStorage.getItem('ep_active_widget'); }catch{}
     if(!_act0) _act0 = 'tasks';
     if(_act0 === 'tasks' || _act0 === 'activities'){
-      duesContainer.classList.remove('ep-hidden');
+      // FIX CAUSE A/B: en la carga el primer paint es el estado FINAL (instant) —
+      // la entrada animada aquí competía con __ep_restoreActive y causaba el
+      // parpadeo/stutter del open animation al cargar. Los clicks de usuario
+      // siguen animando (toggleTasks → applyExclusiveWidget sin opts).
+      try { showWidget(duesContainer, 'tasks', { instant: true }); } catch { duesContainer.classList.remove('ep-hidden'); }
       const _wr0 = duesContainer.closest ? duesContainer.closest('.ep-wrapper') : null;
       if(_wr0) _wr0.classList.remove('ep-collapsed');
     }
@@ -13838,6 +16864,7 @@ async function __ep_fac_topup(card, courseId, token, facUser) {
             if (imEl && im) { imEl.src = im; imEl.alt = nm; }
             try { __ep_fac_save(courseId, card, nm, im, fMail, fNom); } catch {}
             try { __ep_fac_role(card, fMail || 'Facilitador'); } catch {}
+            try{ epPerf('fac:nombre real (' + String(courseId||'') + ')'); }catch{}
           } catch {}
           return;
         }
@@ -14032,6 +17059,10 @@ function __ep_fac_identify(card, cache) {
 }
 async function injectFacilitators(){
   try{
+    // Gate ÚNICO arriba: sin "mostrar facilitador" no corre NI el PASO 0 ni el
+    // topup especulativo (antes el placeholder se pintaba sin estilos y corrumpía
+    // la tarjeta compacta con la opción apagada).
+    if(!loadEpConfig().showFacilitator) { console.log('[EP] fac: desactivado en config'); return; }
     // PASO 0 instantaneo (cero red): pinta generico/cache-titulo YA, sin esperar turno.
     // La red (cursos/topup) espera abajo hasta que tareas pinte. Idempotente y seguro repetir.
     try{
@@ -14050,13 +17081,20 @@ async function injectFacilitators(){
             }
           }catch{}
           if(!_done0){ try{ __ep_fac_paint(_pc, 'Facilitador', 'https://eminus.uv.mx/eminusapi/profiles/usuario_generico.svg', '', 'Buscando...', ''); }catch{} }
+          // Topup especulativo: si la tarjeta ya expone su curso (data-course-id), pide
+          // integrantes YA — en paralelo con el fetch de cursos, sin esperar su resultado.
+          try{
+            const _tok0 = localStorage.getItem('accessToken');
+            const _star0 = _pc.querySelector('.hiddebutton');
+            const _cid = (_star0 && _star0.closest('[data-course-id]')) ? _star0.closest('[data-course-id]').dataset.courseId : '';
+            if(_tok0 && _cid && !_pc.dataset.epFacTopupQueued){ _pc.dataset.epFacTopupQueued='1'; __ep_fac_topup(_pc, _cid, _tok0, ''); }
+          }catch{}
         }catch{}
       }
       try{ window.__ep_fac_paintedOnce = true; }catch{}
+      try{ epPerf('fac:paso0 placeholder pintado'); }catch{}
       try{ __ep_perfMark('fac', true); }catch{}
     }catch{}
-    if(!loadEpConfig().showFacilitator) { console.log('[EP] fac: desactivado en config'); return; }
-    // evita saturar: solo una cola a la vez, espera idle
     if(__ep_fac_running) { console.log('[EP] fac: ya en curso, omito'); return; }
     const cardsAll = document.querySelectorAll('.CardBody');
     if(!cardsAll.length) { console.log('[EP] fac: sin .CardBody todavía'); return; }
@@ -14076,27 +17114,16 @@ async function injectFacilitators(){
     // FIX velocidad: el placeholder es barato (12 divs) — se pinta YA, sin esperar idle
     const token = localStorage.getItem('accessToken');
     let cache = window.__ep_active_courses_cache || window.__ep_courses_cache || [];
-    // Red diferida: cursos/topup esperan a que tareas pinte, haya cursos, o 15s.
-    // La pintura instantanea ya ocurrio arriba.
-    try{
-      let _coursesReady = false;
-      try{ _coursesReady = !!((window.__ep_active_courses_cache && window.__ep_active_courses_cache.length) || (window.__ep_courses_cache && window.__ep_courses_cache.length)); }catch{}
-      if(!window.__ep_tasksPainted && !_coursesReady){
-        let _ageN = 999999;
-        try{ _ageN = performance.now() - (window.__ep_t0 || 0); }catch{}
-        if(_ageN < 15000){
-          __ep_fac_running = false;
-          setTimeout(()=>{ try{ injectFacilitators(); }catch{} }, 3000);
-          return;
-        }
-      }
-    }catch{}
-    // FIX: no depende del widget tareas — trae cursos (1 sola llamada) si falta caché
-    if ((!cache || !cache.length) && token && !window.__ep_courses_fetching) {
-      window.__ep_courses_fetching = true;
+    // FIX instantaneo: la red del facilitador ya NO espera al widget de tareas.
+    // Cursos/topup corren de una vez (en paralelo con tareas); el placeholder del
+    // PASO 0 se pinta al instante y el topup lo sustituye en cuanto llega el dato.
+    // getAllCourses ya dedupe (promesa compartida + memo 60s): sin guard externo —
+    // el flag __ep_courses_fetching de tareas puede estar true con la llamada AÚN
+    // diferida, y esperarlo dejaba al fac "Sin match" hasta el siguiente ciclo.
+    if ((!cache || !cache.length) && token) {
       try { await getAllCourses(token); } catch {}
-      window.__ep_courses_fetching = false;
       cache = window.__ep_active_courses_cache || window.__ep_courses_cache || [];
+      try{ epPerf('fac:cursos listos (' + (cache ? cache.length : 0) + ')'); }catch{}
     }
     // PASO 1 (sync, sin red): pinta al instante desde caché por título o genérico
     for (let idx = 0; idx < cards.length; idx++) {
@@ -14416,6 +17443,14 @@ function updateEmptyState() {
   const allItems = actsList.querySelectorAll('.act-item');
   // Si no hay act-items, asegura que .no-activities con kind correcto esté visible (fix exams no se mostraba cuando no hay tareas)
   if (allItems.length === 0) {
+    // FIX login-stuck: con el skeleton aún visible el contenido está cargando — pintar
+    // "sin tareas" aquí es falso (nunca junto al skeleton, mismo invariante del render).
+    // El poll de 3s (abajo) relanza la carga si se quedó atascada.
+    try{
+      const _cb = actsList.parentElement;
+      const _sk = _cb ? _cb.querySelector(':scope > .skeleton-cards') : null;
+      if (_sk && !_sk.classList.contains('ep-skeleton-hidden')) return;
+    }catch{}
     const emptyMsg = actsList.querySelector('.no-visible-tasks');
     if (emptyMsg) emptyMsg.style.display = 'none';
     const kind = (typeof currentContentType !== 'undefined' && ['tasks','exams','forums'].includes(currentContentType)) ? currentContentType : 'tasks';
@@ -14470,14 +17505,50 @@ function updateEmptyState() {
 
 // Red de seguridad ligera: los renders ya llaman a updateEmptyState en 9 sitios;
 // este poll solo cubre casos raros (counter 0 sin nada). 800ms->3000ms + pausa en oculto.
-try{ setInterval(()=>{ try{ if(document.hidden) return; updateEmptyState(); }catch{} }, 3000); }catch{}
+// FIX login-stuck: si tareas quedó con skeleton visible, sin act-items y sin carga en vuelo
+// (boost quemado en login, render en DOM remontado por la SPA), relanza la carga.
+try{ setInterval(()=>{ try{
+  if(document.hidden) return;
+  try{
+    if(currentContentType === 'activities'){
+      const al = document.querySelector('.acts-list');
+      if(al && !al.querySelector('.act-item')){
+        const cb = al.closest('.content-body');
+        const sk = cb ? cb.querySelector(':scope > .skeleton-cards') : null;
+        if(sk && !sk.classList.contains('ep-skeleton-hidden')){
+          const tok = localStorage.getItem('accessToken');
+          const now = Date.now();
+          if(tok && !window.__ep_loadingActivities && !window.__ep_acts_refreshing && (now - (window.__ep_stuckRetryLast||0) >= 8000)){
+            window.__ep_stuckRetryLast = now;
+            try{ __ep_log('stuck skeleton, relanza tareas'); }catch{}
+            loadActivitiesContent(tok);
+          }
+        }
+      }
+    }
+  }catch{}
+  updateEmptyState();
+}catch{} }, 3000); }catch{}
  // FIX SISTÉMICO: urlChange en SPA — si es list, remueve wrapper heredado, si no, inyecta
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === "urlChange") {
     if(location.pathname.includes('/page/course/list')){
-      try{ document.querySelector('.ep-wrapper')?.remove(); document.querySelector('.ep-right-stack')?.remove(); unmountListSidePanel(); }catch{}
+      // FIX compose-late: antes se borraba .ep-wrapper/.ep-right-stack Y se desmontaba
+      // el panel lateral en CADA urlChange — el evento llegaba después de la
+      // restauración de routeSync y destruía los widgets ya montados; la lista
+      // recomponía desde cero (skeleton + datos) hasta el tick de 3s. Ahora solo se
+      // retiran shells legacy heredados de páginas de curso (los que NO viven dentro
+      // del panel .ep-list-wrap) y se asegura el panel con el widget guardado.
+      try{
+        document.querySelectorAll('.ep-wrapper').forEach(w=>{ try{ if(!w.closest('.ep-list-wrap')) w.remove(); }catch{} });
+        const _sk = document.querySelector('.ep-right-stack');
+        if(_sk && !_sk.closest('.ep-list-wrap')) _sk.remove();
+      }catch{}
       try{ injectTasksButton(); injectMailNotification(); injectScheduleButton(); injectMiuvButton(); injectConfigButton(); }catch{}
+      try{ injectBellButton(); }catch{}
       try{ if(loadEpConfig().showFacilitator) injectFacilitators(); }catch{}
+      try{ if(typeof __ep_ensureListWidget==='function') __ep_ensureListWidget(); }catch{}
+      try{ if(typeof __ep_compactComposeBurst==='function') __ep_compactComposeBurst(); }catch{}
     } else {
       // FIX: al navegar en la SPA Angular destruye el DOM — remonta todo, no solo tareas
       try{ injectStyles(); }catch{}
@@ -14491,6 +17562,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       try{ injectScheduleButton(); }catch{}
       try{ injectMiuvButton(); }catch{}
       try{ injectConfigButton(); }catch{}
+      try{ injectBellButton(); }catch{}
       try{ __ep_restoreActive(); }catch{}
     }
   }
@@ -14786,7 +17858,10 @@ function getAvatarHTML(msg, initials, senderSafe, isEager = false) {
   const finalUrl = cachedUrl || url || fallbackUrl;
   const escUrl = finalUrl.replace(/"/g, '&quot;');
   const loading = isCached ? 'eager' : (isEager ? 'eager' : 'lazy');
-  const decoding = isCached ? 'sync' : (isEager ? 'sync' : 'async');
+  // FIX MAIL-PERF (plan 678879b6): decodificado SIEMPRE async — decoding='sync'
+  // en los primeros avatares obligaba a decodificar la imagen en el hilo
+  // principal dentro de la ventana de la animación de entrada (tirón al abrir).
+  const decoding = 'async';
   const fetchPriority = isCached ? 'high' : (isEager ? 'high' : 'low');
   const initOpacity = isCached ? "1" : "0";
   const initScale = isCached ? "scale(1)" : "scale(0.96)";
@@ -15161,6 +18236,8 @@ function __ep_paintBtnBox(el) {
 function paintMailBadge(badge) {
   try {
     if (!badge) return;
+    // Widget de correo desactivado: sin contador (el guardián cada 2s también pasa por aquí)
+    try { if (loadEpConfig().mailWidget === false) { badge.style.setProperty('display', 'none', 'important'); return; } } catch {}
     let accent = null;
     try {
       const c = loadEpConfig();
@@ -15202,6 +18279,18 @@ async function loadMailBadge(bearerToken, mailBar) {
     const badge = bar.querySelector('.ep-mail-badge');
     const btn = bar.querySelector('.ep-mail-btn') || bar;
     if (!badge) return;
+    // Widget de correo desactivado: sin contador en el icono (ni fetch de mensajes)
+    // FIX: el CSS del badge usa display:flex !important — hay que ganarle con inline !important
+    try {
+      if (loadEpConfig().mailWidget === false) {
+        badge.style.setProperty('display', 'none', 'important');
+        badge.textContent = '0';
+        if (btn) btn.classList.remove('has-unread');
+        const barCount = document.querySelector('.ep-mail-panel-count');
+        if (barCount) barCount.classList.remove('has-unread');
+        return;
+      }
+    } catch {}
     const tok = bearerToken || localStorage.getItem('accessToken');
     if (!tok) return;
     let msgs = [];
@@ -15212,7 +18301,8 @@ async function loadMailBadge(bearerToken, mailBar) {
     try { unread = msgs.filter(m => __ep_isKeepUnread(m)).length; }
     catch { unread = msgs.filter(m => m && m.leido === 0).length; }
     badge.textContent = unread > 99 ? '99+' : String(unread);
-    badge.style.display = unread > 0 ? '' : 'none';
+    if (unread > 0) badge.style.removeProperty('display');
+    else badge.style.setProperty('display', 'none', 'important');
     paintMailBadge(badge);
     try {
       btn.classList.toggle('has-unread', unread > 0);
@@ -15494,6 +18584,7 @@ function __ep_ensureListWidget(){
       try{ if(typeof __ep_adoptFixedToSide==='function') __ep_adoptFixedToSide(); }catch{}
     }
     try{ __ep_restoreActive(); }catch{}
+    try{ if(typeof __ep_compactComposeBurst==='function') __ep_compactComposeBurst(); }catch{}
     return true;
   }catch{ return false; }
 }
@@ -15801,17 +18892,24 @@ function __ep_adoptFixedToSide(){
   if(window.__ep_tokenWatchOn) return;
   window.__ep_tokenWatchOn = true;
   try{ window.__ep_lastTok = localStorage.getItem('accessToken'); }catch{}
+  // Espejo inicial: el SW necesita ep_eminus_token fresco aunque el token no haya cambiado aún
+  try { const _t0 = window.__ep_lastTok; if (_t0) chrome.storage.local.set({ ep_eminus_token: { t: String(_t0).replace(/^Bearer /,''), ts: Date.now() } }); } catch {}
   setInterval(()=>{
     try{
       let t = null;
       try{ t = localStorage.getItem('accessToken'); }catch{}
       if(t && t !== window.__ep_lastTok){
+        // FIX burn en login: no consumir el trigger mientras el DOM de login siga vivo;
+        // el recheck viene en el próximo tick (cada 2.5s, barato) y ahí sí procede.
+        try{ if(typeof __ep_isLogin === 'function' && __ep_isLogin()) return; }catch{}
+        try{ if(typeof __ep_isCoursePage === 'function' && __ep_isCoursePage()) return; }catch{}
         window.__ep_lastTok = t;
+        // Notif sin pestaña: espeja el token fresco al SW (ep_eminus_token) — el check de
+        // fondo usa ESTE token cuando no hay ninguna pestaña de Eminus abierta.
+        try { chrome.storage.local.set({ ep_eminus_token: { t: String(t).replace(/^Bearer /,''), ts: Date.now() } }); } catch {}
         // cambio de usuario: invalida nodos preservados (eran del otro dueño)
         try{ window.__ep_stash = null; }catch{}
         try{
-          if(typeof __ep_isLogin === 'function' && __ep_isLogin()) return;
-          if(typeof __ep_isCoursePage === 'function' && __ep_isCoursePage()) return;
           if(window.__ep_loadingActivities || window.__ep_acts_refreshing) return;
           const bad = document.querySelector('.no-activities, .error-message');
           const skel = document.querySelector('.acts-list .skeleton-card');
@@ -15850,13 +18948,16 @@ function __ep_adoptFixedToSide(){
       const _t = localStorage.getItem('accessToken');
       if(_t){ try{ typeof __ep_bounceSnap === 'function' && __ep_bounceSnap(); }catch{} }
       if(_t && !_had){
+        // FIX burn en login: los bails se evalúan ANTES de consumir el one-shot.
+        // Antes _had=true se gastaba mientras el DOM de login aún vivía (submit ->
+        // navegación), el boost regresaba sin montar ni cargar y nunca reintentaba.
+        try{ if(typeof __ep_isLogin === 'function' && __ep_isLogin()) return; }catch{}
+        try{ if(typeof __ep_isCoursePage === 'function' && __ep_isCoursePage()) return; }catch{}
         _had = true;
         try{ localStorage.setItem('ep_active_widget','tasks'); }catch{}
         try{ window.__ep_saved_active = 'tasks'; }catch{}
         try{ __ep_log('login-boost'); }catch{}
         try{
-          if(typeof __ep_isLogin === 'function' && __ep_isLogin()) return;
-          if(typeof __ep_isCoursePage === 'function' && __ep_isCoursePage()) return;
           const _isList = (typeof __ep_isList === 'function' && __ep_isList());
           if(_isList){
             try{ mountListSidePanel(); }catch{}
@@ -16025,6 +19126,7 @@ async function injectMailNotification() {
     mailBtn.className = 'ep-mail-btn';
     __ep_paintBtnBox(mailBtn);
     mailBtn.title = 'Mensajes — Ver en widget';
+    try { if (loadEpConfig().mailWidget === false) mailBtn.title = 'Mensajes — Abrir Centro de mensajes'; } catch {}
         mailBtn.innerHTML = `
       <svg class="ep-mail-icon" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6">
         <rect x="2" y="4" width="20" height="16" rx="2"/>
@@ -16052,18 +19154,26 @@ async function injectMailNotification() {
     } catch {}
 
     // Apple §1: respuesta en pointerdown (no click), captura + haptic §13, sin delay 300ms
-    function toggleMail() {
+    async function toggleMail() {
+      // Widget de mensajes desactivado: mismo botón, mismo diseño, mismas animaciones,
+      // pero en lugar de abrir el widget navega al Centro de mensajes (como el botón "Centro")
+      try { if (loadEpConfig().mailWidget === false) { try { navigator.vibrate?.(10); } catch {} window.location.href = 'https://eminus.uv.mx/eminus4/page/messages/0'; return; } } catch {}
       const cur = getActiveWidget();
       const hidden = document.querySelector('.ep-mail-widget.ep-hidden');
-      if (cur === 'mail' && !hidden) hideAllWidgets();
+      if (cur === 'mail' && !hidden) await hideAllWidgets();
       else toggleMailWidget();
       try { navigator.vibrate?.(10); } catch {}
     }
     let _mailPtr = false;
     mailBtn.style.touchAction = 'manipulation';
+    // FIX CAUSE 3: re-init puede volver a pasar por aqui — bind una sola vez por elemento
+    if (mailBtn.dataset.epBound !== '1') {
+    mailBtn.dataset.epBound = '1';
     mailBtn.addEventListener('pointerdown', (e) => {
       if (e.button !== 0) return;
       e.preventDefault(); e.stopPropagation();
+      if (!__ep_toggleGuard(mailBtn)) return;
+      try { __ep_mailPrefetch(1); } catch {} // FIX MAIL-PERF: datos listos al abrir (idempotente)
       _mailPtr = true;
       try { mailBtn.setPointerCapture(e.pointerId); } catch {}
       toggleMail();
@@ -16071,9 +19181,12 @@ async function injectMailNotification() {
     });
     mailBtn.addEventListener('click', (e) => {
       if (_mailPtr) { e.preventDefault(); e.stopPropagation(); return; }
-      e.preventDefault(); e.stopPropagation(); toggleMail();
+      e.preventDefault(); e.stopPropagation();
+      if (!__ep_toggleGuard(mailBtn)) return;
+      toggleMail();
     });
-    mailBtn.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleMail(); }});
+    mailBtn.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); if (!__ep_toggleGuard(mailBtn)) return; toggleMail(); }});
+    }
 
     // Initial badge load
     loadMailBadge(bearerToken, mailBar);
@@ -16114,10 +19227,10 @@ async function injectMailNotification() {
     `;notifContainer.insertBefore(scheduleBtn, notifContainer.firstChild);
 
     // Apple §1: pointerdown instant + haptic
-    function toggleSched() {
+    async function toggleSched() {
       const cur = getActiveWidget();
       const hidden = document.querySelector('.ep-schedule-widget.ep-hidden');
-      if (cur === 'schedule' && !hidden) hideAllWidgets();
+      if (cur === 'schedule' && !hidden) await hideAllWidgets();
       else toggleScheduleWidget();
       try { navigator.vibrate?.(10); } catch {}
     }
@@ -16126,9 +19239,13 @@ async function injectMailNotification() {
     scheduleBtn.tabIndex = 0;
     scheduleBtn.setAttribute('role', 'button');
     scheduleBtn.setAttribute('aria-label', 'Mi Horario');
+    // FIX CAUSE 3: bind una sola vez por elemento
+    if (scheduleBtn.dataset.epBound !== '1') {
+    scheduleBtn.dataset.epBound = '1';
     scheduleBtn.addEventListener('pointerdown', (e) => {
       if (e.button !== 0) return;
       e.preventDefault(); e.stopPropagation();
+      if (!__ep_toggleGuard(scheduleBtn)) return;
       _schedPtr = true;
       try { scheduleBtn.setPointerCapture(e.pointerId); } catch {}
       toggleSched();
@@ -16136,9 +19253,12 @@ async function injectMailNotification() {
     });
     scheduleBtn.addEventListener('click', (e) => {
       if (_schedPtr) { e.preventDefault(); e.stopPropagation(); return; }
-      e.preventDefault(); e.stopPropagation(); toggleSched();
+      e.preventDefault(); e.stopPropagation();
+      if (!__ep_toggleGuard(scheduleBtn)) return;
+      toggleSched();
     });
-    scheduleBtn.addEventListener('keydown', (e) => { if (e.key==='Enter' || e.key===' ') { e.preventDefault(); toggleSched(); }});
+    scheduleBtn.addEventListener('keydown', (e) => { if (e.key==='Enter' || e.key===' ') { e.preventDefault(); if (!__ep_toggleGuard(scheduleBtn)) return; toggleSched(); }});
+    }
   });
 }
 function injectMiuvButton() {
@@ -16160,10 +19280,10 @@ function injectMiuvButton() {
         <path d="M6 11.5V16a6 3 0 0 0 12 0v-4.5"/>
       </svg>
     `;notifContainer.insertBefore(miuvBtn, notifContainer.firstChild);
-    function toggleMiuv() {
+    async function toggleMiuv() {
       const cur = getActiveWidget();
       const hidden = document.querySelector('.ep-miuv-widget.ep-hidden');
-      if (cur === 'miuv' && !hidden) hideAllWidgets();
+      if (cur === 'miuv' && !hidden) await hideAllWidgets();
       else toggleMiuvWidget();
       try { navigator.vibrate?.(10); } catch {}
     }
@@ -16172,9 +19292,13 @@ function injectMiuvButton() {
     miuvBtn.tabIndex = 0;
     miuvBtn.setAttribute('role','button');
     miuvBtn.setAttribute('aria-label','MiUV');
+    // FIX CAUSE 3: bind una sola vez por elemento
+    if (miuvBtn.dataset.epBound !== '1') {
+    miuvBtn.dataset.epBound = '1';
     miuvBtn.addEventListener('pointerdown', (e) => {
       if (e.button !== 0) return;
       e.preventDefault(); e.stopPropagation();
+      if (!__ep_toggleGuard(miuvBtn)) return;
       _miuvPtr = true;
       try { miuvBtn.setPointerCapture(e.pointerId); } catch {}
       toggleMiuv();
@@ -16182,9 +19306,12 @@ function injectMiuvButton() {
     });
     miuvBtn.addEventListener('click', (e) => {
       if (_miuvPtr) { e.preventDefault(); e.stopPropagation(); return; }
-      e.preventDefault(); e.stopPropagation(); toggleMiuv();
+      e.preventDefault(); e.stopPropagation();
+      if (!__ep_toggleGuard(miuvBtn)) return;
+      toggleMiuv();
     });
-    miuvBtn.addEventListener('keydown', (e) => { if (e.key==='Enter' || e.key===' ') { e.preventDefault(); toggleMiuv(); }});
+    miuvBtn.addEventListener('keydown', (e) => { if (e.key==='Enter' || e.key===' ') { e.preventDefault(); if (!__ep_toggleGuard(miuvBtn)) return; toggleMiuv(); }});
+    }
   });
 }
 // FIX F: Botón tareas topbar — 1 click muestra tareas (exclusivo, sin doble click)
@@ -16209,13 +19336,15 @@ function injectTasksButton() {
     `;
     notifContainer.insertBefore(tasksBtn, notifContainer.firstChild);
     // Apple §1: pointerdown instant, haptic, interrumpible
-    function toggleTasks() {
+    async function toggleTasks() {
+      __ep_prePromoteSheet('tasks'); // FIX MAIL-PERF GPU: promoción pre-animación
       try{ __ep_markUserAction(); }catch{}
+      try{ __epCleanupWidgetDuplicates(); }catch{}
       // FIX: en list el contenedor no existe (anti-freeze) → créalo bajo demanda al pulsar
       try { injectPendingActivitiesWidget(true); } catch {}
       const cur = getActiveWidget();
       const hidden = document.querySelector('.dues-container.ep-hidden');
-      if (cur === 'tasks' && !hidden) hideAllWidgets();
+      if (cur === 'tasks' && !hidden) await hideAllWidgets();
       else applyExclusiveWidget('tasks');
       try { navigator.vibrate?.(10); } catch {}
     }
@@ -16224,9 +19353,13 @@ function injectTasksButton() {
     tasksBtn.tabIndex = 0;
     tasksBtn.setAttribute('role', 'button');
     tasksBtn.setAttribute('aria-label', 'Tareas Pendientes');
+    // FIX CAUSE 3: bind una sola vez por elemento
+    if (tasksBtn.dataset.epBound !== '1') {
+    tasksBtn.dataset.epBound = '1';
     tasksBtn.addEventListener('pointerdown', (e) => {
       if (e.button !== 0) return;
       e.preventDefault(); e.stopPropagation();
+      if (!__ep_toggleGuard(tasksBtn)) return;
       _tasksPtr = true;
       try { tasksBtn.setPointerCapture(e.pointerId); } catch {}
       toggleTasks();
@@ -16234,9 +19367,12 @@ function injectTasksButton() {
     });
     tasksBtn.addEventListener('click', (e) => {
       if (_tasksPtr) { e.preventDefault(); e.stopPropagation(); return; }
-      e.preventDefault(); e.stopPropagation(); toggleTasks();
+      e.preventDefault(); e.stopPropagation();
+      if (!__ep_toggleGuard(tasksBtn)) return;
+      toggleTasks();
     });
-    tasksBtn.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleTasks(); }});
+    tasksBtn.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); if (!__ep_toggleGuard(tasksBtn)) return; toggleTasks(); }});
+    }
   });
 }
 
@@ -16278,15 +19414,32 @@ function injectConfigButton() {
       `;
       __ep_paintBtnBox(configBtn);
       configBtn.style.touchAction = 'manipulation';
+      // FIX claro definitivo: hover del engranaje = transparente por INLINE !important
+      // (la capa que gana a cualquier hoja del sitio/extension). Mouseleave restaura.
+      configBtn.addEventListener('mouseenter', ()=>{
+        try{
+          if(document.documentElement.classList.contains('ep-dark')) return;
+          configBtn.style.setProperty('background-color','transparent','important');
+          configBtn.style.setProperty('border-color','transparent','important');
+          configBtn.style.setProperty('filter','none','important');
+        }catch{}
+      });
+      configBtn.addEventListener('mouseleave', ()=>{
+        try{ configBtn.style.removeProperty('background-color'); configBtn.style.removeProperty('border-color'); configBtn.style.removeProperty('filter'); }catch{}
+      });
       const indicator = notifContainer.querySelector('.ep-btn-indicator');
       if (indicator && indicator.parentNode === notifContainer) notifContainer.insertBefore(configBtn, indicator);
       else notifContainer.appendChild(configBtn);
       let _cfgPtr = false;
       configBtn.tabIndex = 0;
       configBtn.setAttribute('role', 'button');
+      // FIX CAUSE 3: bind una sola vez por elemento
+      if (configBtn.dataset.epBound !== '1') {
+      configBtn.dataset.epBound = '1';
       configBtn.addEventListener('pointerdown', (e) => {
         if (e.button !== 0) return;
         e.preventDefault(); e.stopPropagation();
+        if (!__ep_toggleGuard(configBtn)) return;
         _cfgPtr = true;
         try { configBtn.setPointerCapture(e.pointerId); } catch {}
         toggleConfigWidget();
@@ -16294,11 +19447,162 @@ function injectConfigButton() {
       });
       configBtn.addEventListener('click', (e) => {
         if (_cfgPtr) { e.preventDefault(); e.stopPropagation(); return; }
-        e.preventDefault(); e.stopPropagation(); toggleConfigWidget();
+        e.preventDefault(); e.stopPropagation();
+        if (!__ep_toggleGuard(configBtn)) return;
+        toggleConfigWidget();
       });
-      configBtn.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleConfigWidget(); }});
+      configBtn.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); if (!__ep_toggleGuard(configBtn)) return; toggleConfigWidget(); }});
+      }
     } catch (e) { try { console.warn('[EP] injectConfigButton error', e); } catch {} }
   });
+}
+
+/**
+ * FIX campana: botón de notificaciones de vencimiento (24/6/1 h) en la barra —
+ * misma gramática que los 5: paint inline, pointerdown instantáneo con captura,
+ * guard de click, <div> + svg 19px stroke 2.6. Estado .active = notifBell on
+ * (persistido en ep_cfg; el SW hace el check por alarma/startup).
+ */
+function injectBellButton() {
+  // FIX diseño: la campana NO va en la barra — va en cada tarjeta del widget de tareas
+  // (aviso por tarea específica). Aquí solo limpiamos restos de la campana de topbar.
+  try { document.querySelectorAll('m-notification .ep-bell-btn').forEach(b => b.remove()); } catch {}
+}
+// Mapa por tarea: idActividad → true. localStorage para lectura síncrona al render;
+// espejo en chrome.storage para el service worker.
+// FIX persistencia campana: Eminus hace localStorage.clear() al cerrar sesión y el mapa
+// vivía SOLO en localStorage → las campanas activadas se perdían al reentrar. Ahora sigue
+// la misma cadena que ep_cfg: localStorage → sessionStorage (sobrevive al clear en la
+// misma pestaña) → chrome.storage (nueva pestaña / reinicio), con restauración activa.
+function __ep_notifTasksRead() {
+  try {
+    let j = null;
+    try { j = JSON.parse(localStorage.getItem('ep_notif_tasks_v1') || 'null'); } catch {}
+    if (!(j && typeof j === 'object' && !Array.isArray(j))) {
+      try { j = JSON.parse(sessionStorage.getItem('ep_notif_tasks_v1') || 'null'); } catch {}
+    }
+    return (j && typeof j === 'object' && !Array.isArray(j)) ? j : {};
+  } catch { return {}; }
+}
+function __ep_notifTasksWrite(map) {
+  try { localStorage.setItem('ep_notif_tasks_v1', JSON.stringify(map || {})); } catch {}
+  try { sessionStorage.setItem('ep_notif_tasks_v1', JSON.stringify(map || {})); } catch {}
+  try { chrome.storage.local.set({ ep_notif_tasks_v1: map || {} }); } catch {}
+}
+// Resincroniza las campanas ya pintadas tras una restauración (mismo estado, sin re-render)
+function __ep_notifTasksResyncDom() {
+  try {
+    document.querySelectorAll('.act-item.activity').forEach(item => {
+      const bell = item.querySelector('.ep-card-bell-btn');
+      if (!bell) return;
+      let tid = null;
+      const inp = item.querySelector('.ask-input-spec');
+      if (inp && inp.id) tid = String(inp.id).replace(/^ai-card-/, '').replace(/-input$/, '');
+      if (!tid) return;
+      const on = !!__ep_notifTasksRead()[tid];
+      bell.classList.toggle('active', on);
+      bell.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+  } catch {}
+}
+// Restauración activa: si falta el espejo local (clear de logout) trae el mapa de
+// sessionStorage o chrome.storage. Nunca sobrescribe un toggle hecho en vuelo.
+function __ep_notifTasksRestore() {
+  try {
+    if (localStorage.getItem('ep_notif_tasks_v1')) return;
+    if (!localStorage.getItem('accessToken')) return;
+    // 1) espejo rápido de la misma pestaña (sobrevive al clear del logout)
+    let j = null;
+    try { j = JSON.parse(sessionStorage.getItem('ep_notif_tasks_v1') || 'null'); } catch {}
+    if (j && typeof j === 'object' && !Array.isArray(j) && Object.keys(j).length) {
+      __ep_notifTasksWrite(j);
+      __ep_notifTasksResyncDom();
+      return;
+    }
+    // 2) respaldo durable (nueva pestaña / reinicio del navegador)
+    if (window.__ep_ntfRestoreInFlight) return;
+    window.__ep_ntfRestoreInFlight = true;
+    try {
+      chrome.storage.local.get(['ep_notif_tasks_v1']).then(r => {
+        try {
+          const m = r && r.ep_notif_tasks_v1;
+          if (m && typeof m === 'object' && Object.keys(m).length && !localStorage.getItem('ep_notif_tasks_v1')) {
+            __ep_notifTasksWrite(m);
+            __ep_notifTasksResyncDom();
+          }
+        } catch {}
+      }).catch(()=>{}).finally(()=>{ window.__ep_ntfRestoreInFlight = false; });
+    } catch { window.__ep_ntfRestoreInFlight = false; }
+  } catch {}
+}
+try { __ep_notifTasksRestore(); } catch {}
+try { setInterval(() => { try { if(document.hidden) return; __ep_notifTasksRestore(); } catch{} }, 3000); } catch {}
+// Confirma el estado de la campana con un toast material (glass + vibrancy + salida por el mismo camino)
+function __ep_epnToastBell(enabled) {
+  try {
+    if (document.querySelector('.ep-bell-toast')) return;
+    const dark = document.documentElement.classList.contains('ep-dark') || document.body?.classList.contains('ep-dark');
+    const mqMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)');
+    const reduceMotion = !!(mqMotion && mqMotion.matches);
+    const mqTransp = window.matchMedia && window.matchMedia('(prefers-reduced-transparency: reduce)');
+    const reduceTransp = !!(mqTransp && mqTransp.matches);
+
+    const t = document.createElement('div');
+    t.className = 'ep-bell-toast';
+    t.setAttribute('role', 'status');
+    // FIX vibrancy: peso + tracking sobre material translúcido
+    t.style.cssText = 'position:fixed; top:58px; right:16px; z-index:2147483000; max-width:300px; padding:11px 14px; border-radius:16px; font-size:12.5px; font-weight:600; letter-spacing:-0.01em; line-height:1.45; display:flex; align-items:center; gap:10px; opacity:0;';
+    // Material: glass (blur+saturate) o sólido si el usuario pide menos transparencia
+    if (!reduceTransp) {
+      t.style.backdropFilter = 'blur(18px) saturate(170%)';
+      t.style.webkitBackdropFilter = 'blur(18px) saturate(170%)';
+      t.style.background = dark ? 'rgba(20,30,51,0.74)' : 'rgba(255,255,255,0.74)';
+      // borde luminoso superior = luz sobre el material; sombra más profunda en superficie grande
+      t.style.border = dark ? '1px solid rgba(148,163,184,0.22)' : '1px solid rgba(255,255,255,0.55)';
+      t.style.boxShadow = dark
+        ? '0 16px 48px rgba(0,0,0,0.45), 0 0 0 1px rgba(0,0,0,0.25), inset 0 1px 0 rgba(255,255,255,0.08)'
+        : '0 16px 48px rgba(15,23,42,0.22), inset 0 1px 0 rgba(255,255,255,0.65)';
+    } else {
+      t.style.background = dark ? '#141e33' : '#ffffff';
+      t.style.border = dark ? '1px solid #2a3f62' : '1px solid #e2e8f0';
+      t.style.boxShadow = '0 12px 36px rgba(15,23,42,0.25)';
+    }
+    t.style.color = dark ? '#f1f5f9' : '#0f172a';
+    // Icono de campana en chip teñido del acento (causalidad: la campana causó esto)
+    const icon = document.createElement('span');
+    const accent = getComputedStyle(document.documentElement).getPropertyValue('--ep-accent').trim() || '#06b6d4';
+    icon.style.cssText = 'width:28px; height:28px; border-radius:999px; flex-shrink:0; display:inline-flex; align-items:center; justify-content:center;';
+    icon.style.background = dark ? `color-mix(in srgb, ${accent} 22%, transparent)` : `color-mix(in srgb, ${accent} 14%, transparent)`;
+    icon.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="${accent}" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>`;
+    t.appendChild(icon);
+    const txt = document.createElement('span');
+    const ths = (() => { try { const t2 = (loadEpConfig() || {}).notifThresholds; return (Array.isArray(t2) && t2.length) ? [...new Set(t2.map(Number))].sort((a,b)=>b-a).join(' · ') : '24 · 6 · 1'; } catch { return '24 · 6 · 1'; } })();
+    txt.textContent = enabled ? ('Avisos activados para esta tarea · ' + ths + ' h antes') : 'Avisos desactivados para esta tarea';
+    t.appendChild(txt);
+    document.body.appendChild(t);
+    // Movimiento: materializa desde arriba con blur (misma trayectoria al salir)
+    if (!reduceMotion) {
+      t.animate(
+        [{ opacity: 0, transform: 'translateY(-12px) scale(0.96)', filter: 'blur(6px)' },
+         { opacity: 1, transform: 'translateY(0) scale(1)', filter: 'blur(0px)' }],
+        { duration: 320, easing: 'cubic-bezier(0.32, 0.72, 0, 1)' }
+      );
+    }
+    t.style.opacity = '1';
+    setTimeout(() => {
+      try {
+        const out = reduceMotion
+          ? t.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 200, easing: 'ease' })
+          : t.animate(
+            [{ opacity: 1, transform: 'translateY(0) scale(1)', filter: 'blur(0px)' },
+             { opacity: 0, transform: 'translateY(-10px) scale(0.96)', filter: 'blur(6px)' }],
+            { duration: 260, easing: 'cubic-bezier(0.32, 0.72, 0, 1)' }
+          );
+        out.onfinish = () => t.remove();
+        setTimeout(() => { try { t.remove(); } catch {} }, 320);
+      } catch { t.remove(); }
+    }, 2400);
+  } catch {}
 }
 
 /**
@@ -17183,7 +20487,7 @@ function setupWidgetArrowToggle() {
     const cur = getActiveWidget();
     if (cur === 'config') return;
     if(typeof __ep_isConfigOpening==='function' && __ep_isConfigOpening()) return;
-    if (cur === 'hidden') { hideAllWidgets(); return; }
+    if (cur === 'hidden') { try { hideAllWidgets(); } catch {} return; }
     if (cur === 'mail' || cur === 'schedule') return;
     if (hidden) applyExclusiveWidget('tasks');
     else applyExclusiveWidget('miuv');
@@ -17272,13 +20576,13 @@ function setupWidgetArrowToggle() {
       // Evita scroll anchoring del navegador
       arrow.style.overflowAnchor = 'none';
       let _epPtr = false;
-      function doToggleMiuv(e) {
+      async function doToggleMiuv(e) {
         if (e) { e.preventDefault(); e.stopPropagation(); if (e.stopImmediatePropagation) e.stopImmediatePropagation(); }
         // FIX: Congela scroll antes/después para que no "baje" la página
         const sx = window.scrollX, sy = window.scrollY;
         const cur = getActiveWidget();
         const hidden = document.querySelector('.ep-miuv-widget.ep-hidden');
-        if (cur === 'miuv' && !hidden) hideAllWidgets();
+        if (cur === 'miuv' && !hidden) await hideAllWidgets();
         else toggleMiuvWidget();
         // Restaura scroll si hubo salto (previene acción de bajar)
         requestAnimationFrame(() => {
@@ -17436,7 +20740,8 @@ if(__ep_isCoursePage()){
                   try{ setupAppleCTADelegation(); }catch{}
                   waitForNotifContainer(() => {
                     try{ if(__ep_isLogin()) return; }catch{}
-                    injectTasksButton(); injectMailNotification(); injectScheduleButton(); injectMiuvButton(); injectConfigButton();
+      injectTasksButton(); injectMailNotification(); injectScheduleButton(); injectMiuvButton(); injectConfigButton();
+                    try{ injectBellButton(); }catch{}
                   });
                   return;
 }
@@ -17475,6 +20780,7 @@ if(location.pathname.includes('/page/course/list')){
                         if(_settled) return; _settled = true;
                         try{ __ep_log('mount FIXED (Angular tardó)'); }catch{}
                         try{ injectPendingActivitiesWidget(true); }catch{}
+                        try{ __ep_earlyCreateWidget(_early); }catch{}
                         try{ __ep_restoreActive(); }catch{}
                       };
                       const _mountDocked = ()=>{
@@ -17484,6 +20790,7 @@ if(location.pathname.includes('/page/course/list')){
                           mountListSidePanel();
                           // Adopta el shell temprano si existe (cero duplicados, cero refetch)
                           if(!__ep_adoptFixedToSide()) injectPendingActivitiesWidget(true);
+                          try{ __ep_earlyCreateWidget(_early); }catch{}
                           try{ __ep_restoreActive(); }catch{}
                         }catch{ _mountFixed(); }
                       };
@@ -17503,6 +20810,7 @@ if(location.pathname.includes('/page/course/list')){
     waitForNotifContainer(() => {
       try{ if(__ep_isLogin()) return; }catch{}
       injectTasksButton(); injectMailNotification(); injectScheduleButton(); injectMiuvButton(); injectConfigButton();
+      try{ injectBellButton(); }catch{}
     });
     // FIX velocidad: el panel NO espera al topbar — restaura en cuanto existe el contenido (en paralelo)
     waitForListContent(() => {
@@ -17542,6 +20850,8 @@ if(location.pathname.includes('/page/course/list')){
                     if(!_eh0) _eh0 = 'tasks';
                     if(_eh0 !== 'hidden' && (document.body || document.documentElement)){
                       try{ injectPendingActivitiesWidget(); }catch{}
+                      // FIX instant config: mismo early-create que el cascarón con token
+                      try{ __ep_earlyCreateWidget(_eh0); }catch{}
                       try{ __ep_restoreActive(); }catch{}
                     }
                   }catch{}
@@ -17561,6 +20871,10 @@ if(location.pathname.includes('/page/course/list')){
                   if(!_eh) _eh = 'tasks'; // default abierto en login fresco/instalación
                   if(_eh !== 'hidden' && (document.body || document.documentElement)){
                     try{ injectPendingActivitiesWidget(); }catch{}
+                    // FIX instant config: crea YA el widget activo (config incluido) — antes
+                    // config no existía hasta waitForNotifContainer (Angular, segundos) y el
+                    // restore no mostraba nada. Mismo patrón que el early mount de la lista.
+                    try{ __ep_earlyCreateWidget(_eh); }catch{}
                     try{ __ep_restoreActive(); }catch{}
                   }
                 }catch{}
@@ -17588,6 +20902,7 @@ if(location.pathname.includes('/page/course/list')){
       injectScheduleButton();
       injectMiuvButton();
       injectConfigButton();      // FIX: restaura AQUÍ dentro (si m-notification tardó, el de fuera corrió sin widgets)
+      try{ injectBellButton(); }catch{}
       try { __ep_restoreActive(); } catch {}
     });
     // FIX persistencia: los shells ya existen aquí — restaura el abierto + dispara su carga
@@ -17599,9 +20914,10 @@ if(location.pathname.includes('/page/course/list')){
       }
       // FIX: No siempre abierto — respeta hidden, doble click para mostrar
       if (active === 'hidden') {
-        hideAllWidgets();
+        try { hideAllWidgets({ instant: true }); } catch {}
       } else {
-        applyExclusiveWidget(active);
+        // FIX CAUSE A: restore de init — instantáneo, sin animación de entrada
+        applyExclusiveWidget(active, { instant: true });
         if (active === 'schedule') {
           setTimeout(() => {
             const w = document.querySelector('.ep-schedule-widget');
@@ -17683,6 +20999,9 @@ if(location.pathname.includes('/page/course/list')){
         getOrCreateScheduleWidget();
         getOrCreateMailWidget();
         getOrCreateMiuvWidget();
+        // FIX instant config: si Angular borró el wrapper con config abierto, recrearlo en el
+        // mismo tick (antes solo schedule/mail/miuv y config reaparecía tarde)
+        getOrCreateConfigWidget();
         try { __ep_restoreActive(); } catch {}
       }
       // Asegura widgets persistan y respeta exclusivo
@@ -17736,9 +21055,31 @@ if(location.pathname.includes('/page/course/list')){
         try {
           const active = getActiveWidget();
           const toShow = active && active !== 'hidden' ? active : 'hidden';
-          if (toShow === 'hidden') hideAllWidgets();
-          else { console.warn('[EP] Corrección exclusivo: visibles=', totalVisible, 'forzando', toShow); applyExclusiveWidget(toShow); }
+          if (toShow === 'hidden') try { hideAllWidgets({ instant: true }); } catch {}
+          else { console.warn('[EP] Corrección exclusivo: visibles=', totalVisible, 'forzando', toShow); applyExclusiveWidget(toShow, { instant: true }); }
         } catch {}
+      }
+      // FIX restore-fantasma: el restore de arranque puede correr cuando el stack aún no existe
+      // (Angular lo recrea y se lo lleva) y quedarse mudo: 0 widgets visibles para siempre.
+      // Self-heal: en lista, con preferencia activa y 0 visibles → re-aplica el exclusivo y
+      // dispara la carga del widget (horario/correo/MiUV). Guard 8s para no spamear el tick.
+      else if (totalVisible === 0) {
+        try{
+          if(_curActive && _curActive !== 'hidden' && typeof __ep_isList==='function' && __ep_isList()
+             && !(typeof __ep_isConfigOpening==='function' && __ep_isConfigOpening())
+             && (Date.now() - (window.__ep_zeroHeal_last||0) > 8000)){
+            window.__ep_zeroHeal_last = Date.now();
+            console.log('[EP] self-heal: 0 visibles → re-aplico', _curActive);
+            applyExclusiveWidget(_curActive, { instant: true });
+            setTimeout(() => {
+              try{
+                if(_curActive === 'schedule'){ const w = document.querySelector('.ep-schedule-widget'); if (w && !w.dataset.loaded) loadScheduleIndependent(); }
+                else if(_curActive === 'mail'){ const w = document.querySelector('.ep-mail-widget'); const tok = localStorage.getItem('accessToken'); if (w && tok && !w.dataset.loaded) loadMailIndependent(tok); }
+                else if(_curActive === 'miuv'){ const w = document.querySelector('.ep-miuv-widget'); if (w && !w.dataset.gradesLoaded && !w.dataset.avanceLoaded && !w.dataset.examsLoaded){ let t='grades'; try{ t=localStorage.getItem('ep_miuv_tab')||'grades'; }catch{} if(t==='avance') loadMiuvAvance(); else if(t==='exams') loadMiuvExams(); else loadMiuvGrades(); } }
+              }catch{}
+            }, 600);
+          }
+        }catch{}
       }
       } // end else respeta config
       // FIX: cada botón aislado — si uno falla no mata el resto del tick (y queda registrado)
@@ -17747,6 +21088,7 @@ if(location.pathname.includes('/page/course/list')){
       try { if (!__ep_goodBtn('.ep-schedule-btn')) injectScheduleButton(); } catch (e) { try { window.__ep_last_err = { at: Date.now(), where: 'tick-schedule', msg: String(e && e.message) }; } catch {} }
       try { if (!__ep_goodBtn('.ep-miuv-btn')) injectMiuvButton(); } catch (e) { try { window.__ep_last_err = { at: Date.now(), where: 'tick-miuv', msg: String(e && e.message) }; } catch {} }
       try { if (!__ep_goodBtn('m-notification .ep-config-btn')) injectConfigButton(); } catch (e) { try { window.__ep_last_err = { at: Date.now(), where: 'tick-config', msg: String(e && e.message) }; } catch {} }
+              try { injectBellButton(); } catch (e) { try { window.__ep_last_err = { at: Date.now(), where: 'tick-bell', msg: String(e && e.message) }; } catch {} }
       // Limpia panels huérfanos legacy si quedaron (defensa) — ahora son display:none global
       const legacyMailPanel = document.querySelector('.ep-mail-panel');
       if (legacyMailPanel && !legacyMailPanel.closest('.ep-mail-widget')) {
@@ -17847,5 +21189,43 @@ if(location.pathname.includes('/page/course/list')){
       try { startPersistentCheck(); } catch {}
     });
   }
+})();
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// EP Notificaciones — "visto en pantalla": el SW no notifica tareas nuevas que
+// el usuario ya vio en el widget. Observa el DOM del widget de tareas (debounce)
+// y registra los idActividad visibles en ep_seen_on_screen_v1 (cap 800).
+// ═══════════════════════════════════════════════════════════════════════════════
+(function __ep_seenOnScreen(){
+  if (window.__ep_seenOnScreenOn) return;
+  window.__ep_seenOnScreenOn = true;
+  let _t = null;
+  const flush = () => {
+    _t = null;
+    try {
+      const c = document.querySelector('.ep-wrapper .dues-container');
+      if (!c || c.classList.contains('ep-hidden')) return;
+      const list = c.querySelector('.acts-list');
+      if (!list) return;
+      const ids = [];
+      // solo tarjetas de actividad (data-ep-due-ts) para no contaminar con ids de exámenes/foros
+      list.querySelectorAll('.act-item[data-ep-due-ts]').forEach(card => {
+        const el = card.querySelector('[id^="ai-card-"]');
+        const m = /^ai-card-(\d+)/.exec((el && el.id) || '');
+        if (m && ids.indexOf(m[1]) === -1) ids.push(m[1]);
+      });
+      if (!ids.length) return;
+      chrome.storage.local.get(['ep_seen_on_screen_v1']).then(r => {
+        const prev = (r && r.ep_seen_on_screen_v1 && Array.isArray(r.ep_seen_on_screen_v1.ids)) ? r.ep_seen_on_screen_v1.ids : [];
+        const set = new Set(prev);
+        let added = false;
+        ids.forEach(i => { if (!set.has(i)) { set.add(i); added = true; } });
+        if (!added) return;
+        chrome.storage.local.set({ ep_seen_on_screen_v1: { ids: [...set].slice(-800), ts: Date.now() } }).catch(() => {});
+      }).catch(() => {});
+    } catch {}
+  };
+  const schedule = () => { try { if (_t) clearTimeout(_t); _t = setTimeout(flush, 800); } catch {} };
+  try { new MutationObserver(schedule).observe(document.documentElement, { childList: true, subtree: true }); } catch {}
 })();
 

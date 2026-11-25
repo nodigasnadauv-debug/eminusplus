@@ -1,0 +1,35 @@
+﻿{
+  "$schema": "https://design-tokens.github.io/format/#/definitions/Token",
+  "motion": {
+    "duration": {
+      "instant": { "$value": "0ms", "$type": "duration" },
+      "fast": { "$value": "100ms", "$type": "duration" },
+      "normal": { "$value": "200ms", "$type": "duration" },
+      "slow": { "$value": "300ms", "$type": "duration" },
+      "slower": { "$value": "500ms", "$type": "duration" },
+      "page": { "$value": "400ms", "$type": "duration" }
+    },
+    "easing": {
+      "linear": { "$value": "linear", "$type": "cubicBezier" },
+      "ease": { "$value": [0.25, 0.1, 0.25, 1], "$type": "cubicBezier" },
+      "easeIn": { "$value": [0.4, 0, 1, 1], "$type": "cubicBezier" },
+      "easeOut": { "$value": [0, 0, 0.2, 1], "$type": "cubicBezier" },
+      "easeInOut": { "$value": [0.4, 0, 0.2, 1], "$type": "cubicBezier" },
+      "brand": { "$value": [0.34, 1.56, 0.64, 1], "$type": "cubicBezier" },
+      "brandSharp": { "$value": [0.4, 0, 0.6, 1], "$type": "cubicBezier" },
+      "brandGentle": { "$value": [0.25, 0.46, 0.45, 0.94], "$type": "cubicBezier" }
+    },
+    "delay": {
+      "none": { "$value": "0ms", "$type": "duration" },
+      "stagger": { "$value": "50ms", "$type": "duration" },
+      "staggerFast": { "$value": "25ms", "$type": "duration" },
+      "entrance": { "$value": "100ms", "$type": "duration" }
+    },
+    "spring": {
+      "gentle": { "$value": { "stiffness": 120, "damping": 14 }, "$type": "spring" },
+      "default": { "$value": { "stiffness": 170, "damping": 26 }, "$type": "spring" },
+      "stiff": { "$value": { "stiffness": 260, "damping": 20 }, "$type": "spring" },
+      "bouncy": { "$value": { "stiffness": 400, "damping": 30 }, "$type": "spring" }
+    }
+  }
+}

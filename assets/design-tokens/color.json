@@ -1,0 +1,161 @@
+﻿{
+  "$schema": "https://design-tokens.github.io/format/#/definitions/Token",
+  "color": {
+    "primitive": {
+      "brand": {
+        "50": { "$value": "#eff6ff", "$type": "color" },
+        "100": { "$value": "#dbeafe", "$type": "color" },
+        "200": { "$value": "#bfdbfe", "$type": "color" },
+        "300": { "$value": "#93c5fd", "$type": "color" },
+        "400": { "$value": "#60a5fa", "$type": "color" },
+        "500": { "$value": "#3b82f6", "$type": "color" },
+        "600": { "$value": "#2563eb", "$type": "color" },
+        "700": { "$value": "#1d4ed8", "$type": "color" },
+        "800": { "$value": "#1e40af", "$type": "color" },
+        "900": { "$value": "#1e3a8a", "$type": "color" },
+        "950": { "$value": "#172554", "$type": "color" }
+      },
+      "brandSecondary": {
+        "50": { "$value": "#fdf4ff", "$type": "color" },
+        "100": { "$value": "#fae8ff", "$type": "color" },
+        "200": { "$value": "#f5d0fe", "$type": "color" },
+        "300": { "$value": "#f0abfc", "$type": "color" },
+        "400": { "$value": "#e879f9", "$type": "color" },
+        "500": { "$value": "#d946ef", "$type": "color" },
+        "600": { "$value": "#c026d3", "$type": "color" },
+        "700": { "$value": "#a21caf", "$type": "color" },
+        "800": { "$value": "#86198f", "$type": "color" },
+        "900": { "$value": "#701a75", "$type": "color" },
+        "950": { "$value": "#4a044e", "$type": "color" }
+      },
+      "neutral": {
+        "50": { "$value": "#fafafa", "$type": "color" },
+        "100": { "$value": "#f4f4f5", "$type": "color" },
+        "200": { "$value": "#e4e4e7", "$type": "color" },
+        "300": { "$value": "#d4d4d8", "$type": "color" },
+        "400": { "$value": "#a1a1aa", "$type": "color" },
+        "500": { "$value": "#71717a", "$type": "color" },
+        "600": { "$value": "#52525b", "$type": "color" },
+        "700": { "$value": "#3f3f46", "$type": "color" },
+        "800": { "$value": "#27272a", "$type": "color" },
+        "900": { "$value": "#18181b", "$type": "color" },
+        "950": { "$value": "#09090b", "$type": "color" }
+      },
+      "neutralWarm": {
+        "50": { "$value": "#fafaf9", "$type": "color" },
+        "100": { "$value": "#f5f5f4", "$type": "color" },
+        "200": { "$value": "#e7e5e4", "$type": "color" },
+        "300": { "$value": "#d6d3d1", "$type": "color" },
+        "400": { "$value": "#a8a29e", "$type": "color" },
+        "500": { "$value": "#78716c", "$type": "color" },
+        "600": { "$value": "#57534e", "$type": "color" },
+        "700": { "$value": "#44403c", "$type": "color" },
+        "800": { "$value": "#292524", "$type": "color" },
+        "900": { "$value": "#1c1917", "$type": "color" },
+        "950": { "$value": "#0c0a09", "$type": "color" }
+      },
+      "success": {
+        "50": { "$value": "#f0fdf4", "$type": "color" },
+        "100": { "$value": "#dcfce7", "$type": "color" },
+        "200": { "$value": "#bbf7d0", "$type": "color" },
+        "300": { "$value": "#86efac", "$type": "color" },
+        "400": { "$value": "#4ade80", "$type": "color" },
+        "500": { "$value": "#22c55e", "$type": "color" },
+        "600": { "$value": "#16a34a", "$type": "color" },
+        "700": { "$value": "#15803d", "$type": "color" },
+        "800": { "$value": "#166534", "$type": "color" },
+        "900": { "$value": "#14532d", "$type": "color" },
+        "950": { "$value": "#052e16", "$type": "color" }
+      },
+      "warning": {
+        "50": { "$value": "#fffbeb", "$type": "color" },
+        "100": { "$value": "#fef3c7", "$type": "color" },
+        "200": { "$value": "#fde68a", "$type": "color" },
+        "300": { "$value": "#fcd34d", "$type": "color" },
+        "400": { "$value": "#fbbf24", "$type": "color" },
+        "500": { "$value": "#f59e0b", "$type": "color" },
+        "600": { "$value": "#d97706", "$type": "color" },
+        "700": { "$value": "#b45309", "$type": "color" },
+        "800": { "$value": "#92400e", "$type": "color" },
+        "900": { "$value": "#78350f", "$type": "color" },
+        "950": { "$value": "#451a03", "$type": "color" }
+      },
+      "error": {
+        "50": { "$value": "#fef2f2", "$type": "color" },
+        "100": { "$value": "#fee2e2", "$type": "color" },
+        "200": { "$value": "#fecaca", "$type": "color" },
+        "300": { "$value": "#fca5a5", "$type": "color" },
+        "400": { "$value": "#f87171", "$type": "color" },
+        "500": { "$value": "#ef4444", "$type": "color" },
+        "600": { "$value": "#dc2626", "$type": "color" },
+        "700": { "$value": "#b91c1c", "$type": "color" },
+        "800": { "$value": "#991b1b", "$type": "color" },
+        "900": { "$value": "#7f1d1d", "$type": "color" },
+        "950": { "$value": "#450a0a", "$type": "color" }
+      },
+      "info": {
+        "50": { "$value": "#eff6ff", "$type": "color" },
+        "100": { "$value": "#dbeafe", "$type": "color" },
+        "200": { "$value": "#bfdbfe", "$type": "color" },
+        "300": { "$value": "#93c5fd", "$type": "color" },
+        "400": { "$value": "#60a5fa", "$type": "color" },
+        "500": { "$value": "#3b82f6", "$type": "color" },
+        "600": { "$value": "#2563eb", "$type": "color" },
+        "700": { "$value": "#1d4ed8", "$type": "color" },
+        "800": { "$value": "#1e40af", "$type": "color" },
+        "900": { "$value": "#1e3a8a", "$type": "color" },
+        "950": { "$value": "#172554", "$type": "color" }
+      },
+      "white": { "$value": "#ffffff", "$type": "color" },
+      "black": { "$value": "#000000", "$type": "color" }
+    },
+    "semantic": {
+      "primary": {
+        "DEFAULT": { "$value": "{color.primitive.brand.600}", "$type": "color" },
+        "hover": { "$value": "{color.primitive.brand.700}", "$type": "color" },
+        "active": { "$value": "{color.primitive.brand.800}", "$type": "color" },
+        "subtle": { "$value": "{color.primitive.brand.100}", "$type": "color" },
+        "onPrimary": { "$value": "{color.primitive.white}", "$type": "color" }
+      },
+      "secondary": {
+        "DEFAULT": { "$value": "{color.primitive.brandSecondary.600}", "$type": "color" },
+        "hover": { "$value": "{color.primitive.brandSecondary.700}", "$type": "color" },
+        "subtle": { "$value": "{color.primitive.brandSecondary.100}", "$type": "color" }
+      },
+      "surface": {
+        "DEFAULT": { "$value": "{color.primitive.white}", "$type": "color" },
+        "raised": { "$value": "{color.primitive.white}", "$type": "color" },
+        "sunken": { "$value": "{color.primitive.neutral.50}", "$type": "color" },
+        "overlay": { "$value": "rgba(0, 0, 0, 0.5)", "$type": "color" }
+      },
+      "background": {
+        "DEFAULT": { "$value": "{color.primitive.neutral.50}", "$type": "color" },
+        "subtle": { "$value": "{color.primitive.neutral.100}", "$type": "color" },
+        "inverse": { "$value": "{color.primitive.neutral.900}", "$type": "color" }
+      },
+      "content": {
+        "primary": { "$value": "{color.primitive.neutral.900}", "$type": "color" },
+        "secondary": { "$value": "{color.primitive.neutral.600}", "$type": "color" },
+        "tertiary": { "$value": "{color.primitive.neutral.400}", "$type": "color" },
+        "inverse": { "$value": "{color.primitive.white}", "$type": "color" },
+        "disabled": { "$value": "{color.primitive.neutral.300}", "$type": "color" }
+      },
+      "border": {
+        "DEFAULT": { "$value": "{color.primitive.neutral.200}", "$type": "color" },
+        "strong": { "$value": "{color.primitive.neutral.300}", "$type": "color" },
+        "focus": { "$value": "{color.primitive.brand.500}", "$type": "color" },
+        "error": { "$value": "{color.primitive.error.500}", "$type": "color" }
+      },
+      "status": {
+        "success": { "$value": "{color.primitive.success.600}", "$type": "color" },
+        "successSubtle": { "$value": "{color.primitive.success.100}", "$type": "color" },
+        "warning": { "$value": "{color.primitive.warning.600}", "$type": "color" },
+        "warningSubtle": { "$value": "{color.primitive.warning.100}", "$type": "color" },
+        "error": { "$value": "{color.primitive.error.600}", "$type": "color" },
+        "errorSubtle": { "$value": "{color.primitive.error.100}", "$type": "color" },
+        "info": { "$value": "{color.primitive.info.600}", "$type": "color" },
+        "infoSubtle": { "$value": "{color.primitive.info.100}", "$type": "color" }
+      }
+    }
+  }
+}

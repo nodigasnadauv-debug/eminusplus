@@ -1,0 +1,61 @@
+﻿{
+  "$schema": "https://design-tokens.github.io/format/#/definitions/Token",
+  "shadow": {
+    "elevation": {
+      "0": { "$value": "none", "$type": "boxShadow" },
+      "1": { "$value": "0 1px 2px 0 rgba(0, 0, 0, 0.05)", "$type": "boxShadow" },
+      "2": { "$value": "0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px -1px rgba(0, 0, 0, 0.1)", "$type": "boxShadow" },
+      "3": { "$value": "0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1)", "$type": "boxShadow" },
+      "4": { "$value": "0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -4px rgba(0, 0, 0, 0.1)", "$type": "boxShadow" },
+      "5": { "$value": "0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1)", "$type": "boxShadow" }
+    },
+    "semantic": {
+      "card": { "$value": "{shadow.elevation.1}", "$type": "boxShadow" },
+      "dropdown": { "$value": "{shadow.elevation.3}", "$type": "boxShadow" },
+      "modal": { "$value": "{shadow.elevation.5}", "$type": "boxShadow" },
+      "tooltip": { "$value": "{shadow.elevation.2}", "$type": "boxShadow" },
+      "focus": { "$value": "0 0 0 3px {color.primitive.brand.200}", "$type": "boxShadow" }
+    }
+  },
+  "borderRadius": {
+    "scale": {
+      "none": { "$value": "0", "$type": "dimension" },
+      "xs": { "$value": "2px", "$type": "dimension" },
+      "sm": { "$value": "4px", "$type": "dimension" },
+      "md": { "$value": "6px", "$type": "dimension" },
+      "lg": { "$value": "8px", "$type": "dimension" },
+      "xl": { "$value": "12px", "$type": "dimension" },
+      "2xl": { "$value": "16px", "$type": "dimension" },
+      "full": { "$value": "9999px", "$type": "dimension" }
+    },
+    "semantic": {
+      "button": { "$value": "{borderRadius.scale.md}", "$type": "dimension" },
+      "input": { "$value": "{borderRadius.scale.md}", "$type": "dimension" },
+      "card": { "$value": "{borderRadius.scale.lg}", "$type": "dimension" },
+      "modal": { "$value": "{borderRadius.scale.xl}", "$type": "dimension" },
+      "badge": { "$value": "{borderRadius.scale.full}", "$type": "dimension" },
+      "avatar": { "$value": "{borderRadius.scale.full}", "$type": "dimension" }
+    }
+  },
+  "zIndex": {
+    "scale": {
+      "hide": { "$value": -1, "$type": "number" },
+      "base": { "$value": 0, "$type": "number" },
+      "raised": { "$value": 10, "$type": "number" },
+      "dropdown": { "$value": 100, "$type": "number" },
+      "sticky": { "$value": 200, "$type": "number" },
+      "overlay": { "$value": 300, "$type": "number" },
+      "modal": { "$value": 400, "$type": "number" },
+      "popover": { "$value": 500, "$type": "number" },
+      "tooltip": { "$value": 600, "$type": "number" },
+      "toast": { "$value": 700, "$type": "number" }
+    }
+  },
+  "breakpoint": {
+    "sm": { "$value": "640px", "$type": "dimension" },
+    "md": { "$value": "768px", "$type": "dimension" },
+    "lg": { "$value": "1024px", "$type": "dimension" },
+    "xl": { "$value": "1280px", "$type": "dimension" },
+    "2xl": { "$value": "1536px", "$type": "dimension" }
+  }
+}
