@@ -1,37 +1,40 @@
-const _cache = new Map(); // Cache LRU de respuestas reales de Gemini (evita gastar cuota + colisión slice(0,200))
+const _cache = new Map(); // Cache LRU de respuestas reales de Groq (evita gastar cuota + colisión slice(0,200))
 const _suggestLimit = new Map(); // ip -> { count, firstTs, lastTs }
 const _summLimit = new Map(); // ip -> { count, firstTs, lastTs } para /api/summarize
 // FIX SISTÉMICO: hash rápido para cache key (evita colisión prefijo 200)
 function hashKey(s){ let h=0; for(let i=0;i<s.length;i++){ h=(h*31 + s.charCodeAt(i))|0; } return String(h) + '_' + s.length + '_' + s.slice(0,30); }
 function lruSet(map, key, val, max=400){ if(map.size>=max){ const first=map.keys().next().value; map.delete(first); } map.set(key,val); }
 function isThinkingLeak(s){ return /The user wants a one-sentence summary|Based on the provided context|Key elements to include|Here.?s a thinking process|Analyze the Request|system-reminder|Your operational mode|operational mode|read-only|build mode|markdown format|encabezados y listas cuando ayude/i.test(s || ""); }
-// Gemini: único proveedor de IA. Requiere secret GEMINI_API_KEY.
-async function callGemini(env, prompt, isQA) {
-  if (!env.GEMINI_API_KEY) return { err: "no-gemini-key" };
+// Groq: único proveedor de IA. Requiere secret GROQ_API_KEY.
+async function callGroq(env, prompt, isQA) {
+  if (!env.GROQ_API_KEY) return { err: "no-groq-key" };
   const sys = "Eres tutor académico de Eminus Plus. Respondes SIEMPRE en español, claro y directo, con formato markdown breve (encabezados y listas cuando ayude). Nunca muestres procesos internos ni texto en inglés.";
-  // 3.5/3.6 verificados con key real; los lite suelen tener más cuota free; 3.8 al final (503 intermitente)
-  // thinkingBudget:0 solo en full (el lite lo rechaza con 400); sin thinking la respuesta sale completa
-  const models = ["gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.8-flash"];
+  // Modelos Groq verificados: llama-3.3-70b-versatile (best quality), llama-3.1-8b-instant (fastest), mixtral-8x7b-32768
+  const models = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"];
   const errs = [];
-  // FIX vercel: presupuesto TOTAL de la cascada (~22s). En Cloudflare no existía cap
-  // duro de runtime; en Vercel Edge una cascada 4x20s podía morir a mitad (la instancia
-  // se corta). Al cruzar el presupuesto se sale sin intentar más modelos.
+  // FIX vercel: presupuesto TOTAL de la cascada (~22s). En Vercel Edge una cascada puede morir a mitad.
   const t0 = Date.now();
   const BUDGET_MS = 22000;
   for (const m of models) {
-    if (Date.now() - t0 > BUDGET_MS) { errs.push(`gemini budget ${m} (skip)`); continue; }
+    if (Date.now() - t0 > BUDGET_MS) { errs.push(`groq budget ${m} (skip)`); continue; }
     const controller = new AbortController();
     const t = setTimeout(() => controller.abort("timeout"), 20000);
-    const genConfig = { maxOutputTokens: isQA ? 2048 : 800, temperature: 0.4 };
-    if (!m.includes("lite")) genConfig.thinkingConfig = { thinkingBudget: 0 };
     try {
-      const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${env.GEMINI_API_KEY}`, {
+      const r = await fetch(`https://api.groq.com/openai/v1/chat/completions`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${env.GROQ_API_KEY}`
+        },
         body: JSON.stringify({
-          system_instruction: { parts: [{ text: sys }] },
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: genConfig,
+          model: m,
+          messages: [
+            { role: "system", content: sys },
+            { role: "user", content: prompt }
+          ],
+          max_tokens: isQA ? 2048 : 800,
+          temperature: 0.4,
+          stream: false
         }),
         signal: controller.signal,
       });
@@ -40,21 +43,21 @@ async function callGemini(env, prompt, isQA) {
         const body = await r.text().catch(() => "");
         let detail = "";
         try { detail = `: ${JSON.parse(body).error?.message || ""}`.slice(0, 160); } catch { detail = body ? `: ${body.slice(0, 160)}` : ""; }
-        errs.push(`gemini HTTP ${r.status} ${m}${detail}`);
+        errs.push(`groq HTTP ${r.status} ${m}${detail}`);
         continue;
       }
       const j = await r.json().catch(() => ({}));
-      if (j.error) { errs.push(`gemini ERR ${m}: ${String(j.error.message || j.error).slice(0, 160)}`); continue; }
-      let text = j.candidates?.[0]?.content?.parts?.map(p => p.text || "").join("").trim() || "";
-      if (!text) { errs.push(`gemini empty ${m}`); continue; }
+      if (j.error) { errs.push(`groq ERR ${m}: ${String(j.error.message || j.error).slice(0, 160)}`); continue; }
+      let text = j.choices?.[0]?.message?.content?.trim() || "";
+      if (!text) { errs.push(`groq empty ${m}`); continue; }
       // Sanea bloques de instructivo (cerrados o sin cerrar): nunca son parte de la respuesta
       text = text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/gi, "").replace(/<system-reminder[\s\S]*$/gi, "").trim();
-      if (!text) { errs.push(`gemini reminder-only ${m}`); continue; }
-      if (isThinkingLeak(text)) { errs.push(`gemini thinking-leak ${m}`); continue; }
+      if (!text) { errs.push(`groq reminder-only ${m}`); continue; }
+      if (isThinkingLeak(text)) { errs.push(`groq thinking-leak ${m}`); continue; }
       return { text, model: m };
-    } catch (e) { clearTimeout(t); errs.push(`gemini ${m}: ${e.name === "AbortError" ? "timeout" : (e.message || e)}`); }
+    } catch (e) { clearTimeout(t); errs.push(`groq ${m}: ${e.name === "AbortError" ? "timeout" : (e.message || e)}`); }
   }
-  return { err: errs.join(" | ") || "gemini-failed" };
+  return { err: errs.join(" | ") || "groq-failed" };
 }
 
 export default {
@@ -234,29 +237,29 @@ export default {
       // Limpia HTML + system-reminder (evita que el modelo lo incluya en thinking)
       const clean = input.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/gi, "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 4000);
 
-      // Detecta si es Q&A (contiene Pregunta:) o resumen — todo pasa por Gemini
+      // Detecta si es Q&A (contiene Pregunta:) o resumen — todo pasa por Groq
       const isQA = /Pregunta\s*:/i.test(clean);
       const prompt = isQA ? clean : `Resume en 1 frase en español máximo 25 palabras: ${clean}`;
       let lastErr = null;
 
-      // Solo Gemini: único proveedor, sin nada local
-      if (!env.GEMINI_API_KEY) {
-        return new Response(JSON.stringify({ error: "GEMINI_API_KEY no configurada como secret" }), { status: 500, headers: { ...cors, "Content-Type": "application/json" } });
+      // Solo Groq: único proveedor, sin nada local
+      if (!env.GROQ_API_KEY) {
+        return new Response(JSON.stringify({ error: "GROQ_API_KEY no configurada como secret" }), { status: 500, headers: { ...cors, "Content-Type": "application/json" } });
       }
       {
-        const g = await callGemini(env, prompt, isQA);
+        const g = await callGroq(env, prompt, isQA);
         if (g.text) {
           const hk = hashKey(clean); lruSet(_cache, hk, g.text, 400);
-          return new Response(JSON.stringify({ summary: g.text, model: g.model || "gemini" }), { headers: { ...cors, "Content-Type": "application/json" } });
+          return new Response(JSON.stringify({ summary: g.text, model: g.model || "groq" }), { headers: { ...cors, "Content-Type": "application/json" } });
         }
-        lastErr = g.err || "gemini-failed";
+        lastErr = g.err || "groq-failed";
       }
-      // Gemini falló: se sirve caché de una respuesta real anterior, si existe; si no, error real
+      // Groq falló: se sirve caché de una respuesta real anterior, si existe; si no, error real
       const hk2=hashKey(clean);
       if (_cache.has(hk2)) {
         return new Response(JSON.stringify({ summary: _cache.get(hk2), cached: true }), { headers: { ...cors, "Content-Type": "application/json" } });
       }
-      return new Response(JSON.stringify({ error: "IA no disponible — Gemini falló, reintenta en unos segundos", lastErr }), { status: 502, headers: { ...cors, "Content-Type": "application/json" } });
+      return new Response(JSON.stringify({ error: "IA no disponible — Groq falló, reintenta en unos segundos", lastErr }), { status: 502, headers: { ...cors, "Content-Type": "application/json" } });
 
     } catch (e) {
       return new Response(JSON.stringify({ error: e.message || String(e) }), { status: 500, headers: { ...cors, "Content-Type": "application/json" } });

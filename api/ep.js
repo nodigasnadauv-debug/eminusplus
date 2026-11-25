@@ -8,7 +8,7 @@ export const config = { runtime: 'edge' };
 
 function envFromProcess() {
   return {
-    GEMINI_API_KEY: (process.env && process.env.GEMINI_API_KEY) || undefined,
+    GROQ_API_KEY: (process.env && process.env.GROQ_API_KEY) || undefined,
     EP_URL_KEY: (process.env && process.env.EP_URL_KEY) || undefined,
     EP_URL_KEY_VER: (process.env && process.env.EP_URL_KEY_VER) || undefined,
     DISCORD_WEBHOOK_URL: (process.env && process.env.DISCORD_WEBHOOK_URL) || undefined,
