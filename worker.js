@@ -90,9 +90,47 @@ export default {
         }
       }
     }
-    // Salud
+    // Salud + Diagnóstico completo
     if (req.method === "GET" && url.pathname === "/") {
-      return new Response(JSON.stringify({ ok: true, service: "eminus-uvplus-ai", endpoints: ["/api/summarize", "/api/description", "/api/suggest", "/api/miuv/*", "/api/unlock"] }), { headers: { ...cors, "Content-Type": "application/json" } });
+      const diag = {
+        ok: true,
+        service: "eminus-uvplus-ai",
+        version: "3.13.3",
+        timestamp: new Date().toISOString(),
+        env: {
+          GROQ_API_KEY: env.GROQ_API_KEY ? `SET (${env.GROQ_API_KEY.slice(0,8)}...)` : "MISSING ❌",
+          EP_URL_KEY: env.EP_URL_KEY ? `SET (v${env.EP_URL_KEY_VER || "1"})` : "MISSING ❌",
+          DISCORD_WEBHOOK: (env.DISCORD_WEBHOOK_URL || env.DISCORD_SUGGEST_WEBHOOK) ? "SET" : "MISSING ❌"
+        },
+        groq: {
+          models: ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"],
+          cacheEntries: _cache.size,
+          suggestLimitIPs: _suggestLimit.size,
+          summLimitIPs: _summLimit.size
+        },
+        cors: {
+          allowedOrigins: ["eminus.uv.mx", "uv.mx", "chrome-extension://*", "workers.dev", "localhost"],
+          extIdLock: "chrome-extension://hhmkanfafjomoffacpahenjnehfcnhaj",
+          graceUntil: "2026-10-23T00:00:00Z (expired: " + (Date.now() > Date.parse('2026-10-23T00:00:00Z') ? "YES" : "NO") + ")"
+        },
+        endpoints: {
+          "/api/summarize": "POST - Resumen 1 frase / Q&A via Groq",
+          "/api/description": "POST - Alias summarize",
+          "/api/suggest": "POST - Buzón sugerencias → Discord (rate-limit 5/h/IP)",
+          "/api/miuv/*": "GET/POST - Proxy a dsiapes.uv.mx (anti-CORS, session check)",
+          "/api/unlock": "GET - Entrega EP_URL_KEY solo a extension oficial"
+        },
+        rateLimits: {
+          suggest: "5/hora por IP, 60s entre envíos, honeypot, timestamp ±2min",
+          summarize: "30/min por IP, cache LRU 400 entradas"
+        },
+        deploy: {
+          runtime: "Vercel Edge (api/ep.js → worker.js)",
+          budget: "22s total cascade, 20s/model timeout",
+          thinkingBudget: 0
+        }
+      };
+      return new Response(JSON.stringify(diag, null, 2), { headers: { ...cors, "Content-Type": "application/json; charset=utf-8" } });
     }
     // FIX SISTÉMICO: Proxy MiUV — evita CORS redirect a www.uv.mx
     if (url.pathname.startsWith("/api/miuv/")) {
